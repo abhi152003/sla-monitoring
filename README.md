@@ -1,6 +1,71 @@
-# SLA Monitoring Dashboard — Data Cleaning & SLA Calculation Rules
+# SLA Monitoring Dashboard
 
-> **Status: Authoritative policy (WO-1).** This document defines the rules that govern CSV ingestion, cleaning, persistence, SLA calculation, and dashboard metrics. Implementation work (parser, worker, database, dashboard) must conform to it. Architecture, live URL, and run instructions will be added by later work orders.
+Upload a CSV of service health checks, clean it in a stateless Cloudflare Worker, persist it, and see SLA compliance in a Next.js dashboard.
+
+## Getting Started
+
+### Prerequisites
+
+- **Node.js 22 LTS** (current active LTS) and **npm 10+**
+
+### Install
+
+```bash
+npm ci        # clean install from the root lockfile (or: npm install)
+```
+
+Everything runs from the repository root — it's an npm workspace (`apps/*`, `packages/*`) with a single root `package-lock.json`.
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev:web` | Next.js dev server → http://localhost:3000 |
+| `npm run dev:worker` | Wrangler dev server for the Worker → http://localhost:8787 |
+| `npm run build` | Build all workspaces (web `next build`, Worker dry-run bundle) |
+| `npm run lint` | ESLint (web) |
+| `npm run type-check` | `tsc --noEmit` in every workspace |
+| `npm test` | Vitest suites (shared, ingestion); workspaces without tests are skipped |
+
+### Local URLs
+
+- **Web app:** http://localhost:3000
+- **Worker health:** http://localhost:8787/health
+
+### `/health` response contract
+
+`GET /health` returns HTTP 200 with JSON:
+
+```json
+{
+  "status": "ok",
+  "service": "@sla-monitoring/worker",
+  "app": "sla-monitoring",
+  "timestamp": "2026-09-19T19:55:32.051Z"
+}
+```
+
+`status` is the stable field (`"ok"` on success); `timestamp` is ISO-8601 UTC and varies per request. Any other route returns 404 with `{"error":"not_found","message":...}`.
+
+### Environment
+
+`.env.example` templates live in `apps/web` (Worker base URL) and `apps/worker` (database URL placeholder). Copy to `.env.local` / `.dev.vars` and fill in values — never commit real credentials. No configuration is needed to run the current foundation.
+
+### Workspace layout
+
+```
+apps/web        Next.js dashboard (@sla-monitoring/web)
+apps/worker     Cloudflare Worker (@sla-monitoring/worker)
+packages/shared Shared types/constants (@sla-monitoring/shared)
+packages/ingestion CSV ingestion pipeline — placeholder (@sla-monitoring/ingestion)
+database/migrations  SQL migrations (empty placeholder)
+```
+
+---
+
+# Data Cleaning & SLA Calculation Rules
+
+> **Status: Authoritative policy (WO-1).** This document defines the rules that govern CSV ingestion, cleaning, persistence, SLA calculation, and dashboard metrics. Implementation work (parser, worker, database, dashboard) must conform to it. Setup and local run instructions live in *Getting Started* above; the deployed live URL will be added when deployment work lands.
 
 **Sources:** `docs/problem_statement.md`, `docs/dataset_incident_log.json`, and a full profiling pass over the five `docs/monitoring_checks_*.csv` datasets (44,652 raw rows; 9/12/14/21/30-day spans, Apr–Jun 2025; 5 services; one check per service per 15-minute interval).
 

@@ -1,0 +1,19 @@
+{
+  "name": "@sla-monitoring/worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker for stateless CSV processing (health endpoint only in this work order)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run --outdir=dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sla-monitoring/shared": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4",
+    "typescript": "^5",
+    "wrangler": "^4"
+  }
+}
