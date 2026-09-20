@@ -2,18 +2,29 @@
   "name": "@sla-monitoring/worker",
   "version": "0.1.0",
   "private": true,
-  "description": "Cloudflare Worker for stateless CSV processing (health endpoint only in this work order)",
+  "description": "Cloudflare Worker: CSV upload API with Neon PostgreSQL persistence",
   "scripts": {
     "dev": "wrangler dev",
     "build": "wrangler deploy --dry-run --outdir=dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "db:migrate": "prisma migrate deploy",
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
+    "@sla-monitoring/ingestion": "*",
     "@sla-monitoring/shared": "*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4",
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "prisma": "^7.10.0",
     "typescript": "^5",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^3",
     "wrangler": "^4"
   }
 }

@@ -1,0 +1,87 @@
+// Data model for the SLA Monitoring ingestion API.
+// Migrations live in database/migrations (applied with `prisma migrate deploy`).
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Upload {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()"))
+  contentHash         String    @unique @map("content_hash")
+  fileName            String    @map("file_name")
+  byteSize            Int       @map("byte_size") // CHECK byte_size >= 0
+  status              String    @default("processing") // CHECK processing | completed | failed
+  rawRows             Int?      @map("raw_rows") // CHECK >= 0 when present
+  validObservations   Int?      @map("valid_observations") // CHECK >= 0 when present
+  invalidObservations Int?      @map("invalid_observations") // CHECK >= 0 when present
+  rejectedRows        Int?      @map("rejected_rows") // CHECK >= 0 when present
+  duplicateRemovals   Int?      @map("duplicate_removals") // CHECK >= 0 when present
+  reconciledIntervals Int?      @map("reconciled_intervals") // CHECK >= 0 when present
+  lowTrust            Boolean   @default(false) @map("low_trust")
+  dateRangeStart      DateTime? @map("date_range_start") @db.Timestamptz // CHECK <= date_range_end
+  dateRangeEnd        DateTime? @map("date_range_end") @db.Timestamptz
+  report              Json?
+  overallMetrics      Json?     @map("overall_metrics")
+  servicesMetrics     Json?     @map("services_metrics")
+  monthsMetrics       Json?     @map("months_metrics")
+  failureCode         String?   @map("failure_code")
+  failureMessage      String?   @map("failure_message")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  completedAt         DateTime? @map("completed_at") @db.Timestamptz // CHECK >= created_at
+
+  checks             ReconciledCheck[]
+  rejectedRowRecords RejectedRow[]
+  invalidRecords     InvalidObservation[]
+
+  @@index([status])
+  @@map("uploads")
+}
+
+model ReconciledCheck {
+  id               BigInt   @id @default(autoincrement())
+  uploadId         String   @map("upload_id")
+  serviceId        String   @map("service_id")
+  serviceName      String   @map("service_name")
+  checkTimestamp   DateTime @map("check_timestamp") @db.Timestamptz
+  statusCode       Int      @map("status_code")
+  status           String // CHECK success | failure
+  latencyMs        Decimal? @map("latency_ms") @db.Decimal(12, 2) // CHECK >= 0 when present
+  agent            String
+  region           String
+  observationCount Int      @map("observation_count") // CHECK > 0
+  sourceRowNumber  Int      @map("source_row_number") // CHECK > 0
+  observations     Json
+
+  upload Upload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  @@index([uploadId, serviceId, checkTimestamp])
+  @@index([uploadId, status])
+  @@map("reconciled_checks")
+}
+
+model RejectedRow {
+  id        BigInt @id @default(autoincrement())
+  uploadId  String @map("upload_id")
+  rowNumber Int    @map("row_number") // CHECK > 0
+  reason    String
+  rowValues Json   @map("row_values")
+
+  upload Upload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  @@index([uploadId])
+  @@index([uploadId, reason])
+  @@map("rejected_rows")
+}
+
+model InvalidObservation {
+  id        BigInt @id @default(autoincrement())
+  uploadId  String @map("upload_id")
+  rowNumber Int    @map("row_number") // CHECK > 0
+  reason    String
+  rowValues Json   @map("row_values")
+
+  upload Upload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  @@index([uploadId])
+  @@map("invalid_observations")
+}

@@ -1,6 +1,6 @@
 # SLA Monitoring Dashboard
 
-Upload a CSV of service health checks, clean it in a stateless Cloudflare Worker, persist it, and see SLA compliance in a Next.js dashboard.
+Upload a CSV of service health checks, clean it in a stateless Cloudflare Worker, persist the result in Neon PostgreSQL, and expose the stored SLA summary to the Next.js app.
 
 ## Getting Started
 
@@ -23,33 +23,117 @@ Everything runs from the repository root — it's an npm workspace (`apps/*`, `p
 | `npm run dev:web` | Next.js dev server → http://localhost:3000 |
 | `npm run dev:worker` | Wrangler dev server for the Worker → http://localhost:8787 |
 | `npm run build` | Build all workspaces (web `next build`, Worker dry-run bundle) |
-| `npm run lint` | ESLint (web) |
+| `npm run lint` | ESLint in every workspace that defines a lint script |
 | `npm run type-check` | `tsc --noEmit` in every workspace |
-| `npm test` | Vitest suites (shared, ingestion); workspaces without tests are skipped |
+| `npm test` | Vitest suites (shared, ingestion, and Worker unit tests); gated database/E2E suites run only when their test URL is supplied |
 
 ### Local URLs
 
 - **Web app:** http://localhost:3000
 - **Worker health:** http://localhost:8787/health
 
+### Architecture
+
+The request path is:
+
+```
+Next.js web app → Cloudflare Worker → @sla-monitoring/ingestion → Neon PostgreSQL
+       ↑                                      │                         │
+       └──────── persisted upload summary ←────┴──────── atomic transaction
+```
+
+The Worker accepts one `multipart/form-data` CSV request (field name `file`, maximum 5 MiB), computes a SHA-256 content hash for idempotency, runs the deterministic ingestion library, and persists the reconciled checks, evidence, report, and metrics in one Neon transaction. `GET /uploads/:id` returns the stored summary without reprocessing. The Worker is stateless between requests; Neon is the durable source of truth. The browser origin is reflected only when it exactly matches `ALLOWED_ORIGIN` (never `*`).
+
 ### `/health` response contract
 
-`GET /health` returns HTTP 200 with JSON:
+`GET /health` checks both Worker liveness and Neon reachability. A healthy database returns HTTP 200:
 
 ```json
 {
   "status": "ok",
   "service": "@sla-monitoring/worker",
   "app": "sla-monitoring",
+  "database": "ok",
   "timestamp": "2026-09-19T19:55:32.051Z"
 }
 ```
 
-`status` is the stable field (`"ok"` on success); `timestamp` is ISO-8601 UTC and varies per request. Any other route returns 404 with `{"error":"not_found","message":...}`.
+When Neon is unreachable, the same shape has `status: "degraded"`, `database: "unreachable"`, and HTTP 503. `timestamp` is ISO-8601 UTC and varies per request. An unknown route returns HTTP 404 with `{"error":"not_found","message":...}`; a recognized path with an unsupported method is rejected rather than treated as an upload.
 
 ### Environment
 
-`.env.example` templates live in `apps/web` (Worker base URL) and `apps/worker` (database URL placeholder). Copy to `.env.local` / `.dev.vars` and fill in values — never commit real credentials. No configuration is needed to run the current foundation.
+`.env.example` templates live in `apps/web` (Worker base URL) and `apps/worker` (Neon URL plus CORS origin). Copy the web template to `apps/web/.env.local`. For the Worker, copy it to **both** `apps/worker/.env` (Prisma CLI) and `apps/worker/.dev.vars` (Wrangler dev), then fill in the same `DATABASE_URL` and local `ALLOWED_ORIGIN` values. Never commit real credentials.
+
+`DATABASE_URL` is used in two deliberately separate ways:
+
+- Prisma is used only for schema/migration management. `database/schema.prisma` and `database/migrations/` are applied with `prisma migrate deploy`; Prisma Client is not bundled into the Worker.
+- Worker request handling uses the fetch-based `@neondatabase/serverless` client and raw SQL transactions. This keeps the runtime compatible with Cloudflare Workers while keeping migrations reproducible from the Prisma schema.
+
+Initialize a Neon database locally (from the repository root) with:
+
+```bash
+cp apps/worker/.env.example apps/worker/.env
+cp apps/worker/.env.example apps/worker/.dev.vars
+# Edit both files with the Neon DATABASE_URL and local ALLOWED_ORIGIN.
+npm run db:migrate --workspace apps/worker
+```
+
+The workspace command is the canonical `prisma migrate deploy` invocation and applies every checked-in migration in order. To deploy the Worker, authenticate Wrangler, set the database URL as a secret, configure the browser origin, then deploy:
+
+```bash
+cd apps/worker
+npx wrangler login
+npx wrangler secret put DATABASE_URL
+npx wrangler deploy
+```
+
+`ALLOWED_ORIGIN` is not a database credential: set it to the exact deployed web origin in the production Wrangler `vars`/environment configuration (or store it as a Worker secret after removing the same key from `wrangler.jsonc`). Do not leave the localhost value for a deployed browser client. The deployed `DATABASE_URL` secret must be present before health checks or uploads can succeed.
+
+### Deployed Worker
+
+- **Worker API:** [https://sla-monitoring-worker.abhiprajapati011.workers.dev](https://sla-monitoring-worker.abhiprajapati011.workers.dev)
+- **Health check:** [https://sla-monitoring-worker.abhiprajapati011.workers.dev/health](https://sla-monitoring-worker.abhiprajapati011.workers.dev/health)
+
+Set `NEXT_PUBLIC_WORKER_URL` to the Worker API URL in the web deployment. Re-deploy after changing the Worker secret or production `ALLOWED_ORIGIN` configuration.
+
+### API examples
+
+```bash
+WORKER_URL=http://localhost:8787
+
+# Liveness and database reachability
+curl -i "$WORKER_URL/health"
+
+# Upload a CSV (the multipart field must be named file)
+curl -i -F "file=@docs/monitoring_checks_9d_seed101.csv" "$WORKER_URL/uploads"
+
+# The 201 response contains upload.id. Retrieve its persisted summary:
+curl -i "$WORKER_URL/uploads/<upload-id>"
+```
+
+`POST /uploads` returns HTTP 201 with `{ "created": true, "upload": ... }` for a new upload. Repeating the identical bytes returns HTTP 200 with `created: false` and the original summary. The endpoint returns 400 for malformed/non-CSV multipart input, 413 above 5 MiB, 409 while identical content is already processing, 422 for an ingestion-level CSV error, and 500 for an unexpected server error. Error bodies use `{ "error": "...", "message": "..." }` and never expose SQL, credentials, or stack traces.
+
+### Deployed benchmark procedure and results (WO-4)
+
+Benchmarks send each supplied dataset as one multipart `POST /uploads` request to the deployed Worker and measure wall-clock time until the JSON response is received. A replay sends the exact same bytes again and checks for HTTP 200 with `created: false`; `GET /uploads/<id>` is then used to verify persisted retrieval. Results below are the observed wall times supplied with WO-4:
+
+| Dataset/request | Wall time | Reconciled intervals | Outcome |
+| --- | ---: | ---: | --- |
+| 9-day fresh upload | 1.23 s | 4,318 | completed |
+| 12-day fresh upload | 1.57 s | 5,758 | completed |
+| 30-day fresh upload | 1.78 s | 14,398 | completed |
+| 30-day identical replay | 0.87 s | 14,398 (existing) | `created: false` |
+
+The table above records the supplied wall-time observations; CPU telemetry was not captured for those particular runs. A later controlled 30-day run of the semantically same file (1,167,721-byte file, 1,167,950-byte multipart request, 15,577 raw rows, 14,398 intervals; two trailing blank records ignored) captured the following provider metrics:
+
+| Request | Client wall time | Cloudflare wall time | Cloudflare CPU time | Worker persistence log |
+| --- | ---: | ---: | ---: | ---: |
+| 30-day fresh upload, HTTP 201 | 2.018 s | 1,311 ms | 530 ms | 911 ms |
+| Identical replay, HTTP 200 | 0.903 s | 118 ms | 9 ms | not applicable |
+
+The fresh upload succeeded, but its 530 ms CPU time is well above the Cloudflare Workers Free documented 10 ms CPU budget. The result is preserved as deployment evidence and is routed to WO-5 for a chunked/background redesign. Chunking is outside WO-4's single-request ingestion scope, so this measurement does not invalidate the completed WO-4 API behavior; it does mean that behavior must not be represented as reliably free-tier safe.
+
+The Worker currently uses a single upload request for each CSV. Separately, the persistence layer batches SQL statements inside the atomic Neon transaction (up to 400 reconciled checks per statement and 250 rejected/invalid evidence rows per statement). SQL statement batching limits query size and database protocol pressure; it is not client upload chunking, resumable upload support, or a workaround for the Worker CPU budget. Upload chunking changes the request/processing lifecycle, while statement batching only changes how an already-ingested result is written.
 
 ### Workspace layout
 
@@ -58,7 +142,8 @@ apps/web        Next.js dashboard (@sla-monitoring/web)
 apps/worker     Cloudflare Worker (@sla-monitoring/worker)
 packages/shared Shared types/contracts (@sla-monitoring/shared)
 packages/ingestion CSV processing library (@sla-monitoring/ingestion)
-database/migrations  SQL migrations (empty placeholder)
+database/migrations  Prisma SQL migrations applied with `prisma migrate deploy`
+database/schema.prisma Prisma schema used by migration tooling
 ```
 
 ### Focused ingestion tests
@@ -104,7 +189,7 @@ Golden summaries for all five datasets were produced by an independent reference
 
 # Data Cleaning & SLA Calculation Rules
 
-> **Status: Authoritative policy (WO-1).** This document defines the rules that govern CSV ingestion, cleaning, persistence, SLA calculation, and dashboard metrics. Implementation work (parser, worker, database, dashboard) must conform to it. Setup and local run instructions live in *Getting Started* above; the deployed live URL will be added when deployment work lands.
+> **Status: Authoritative policy (WO-1).** This document defines the rules that govern CSV ingestion, cleaning, persistence, SLA calculation, and dashboard metrics. Implementation work (parser, worker, database, dashboard) must conform to it. Setup, API, migration, deployment, and benchmark notes live in *Getting Started* above; the deployed Worker URL is recorded there.
 
 **Sources:** `docs/problem_statement.md`, `docs/dataset_incident_log.json`, and a full profiling pass over the five `docs/monitoring_checks_*.csv` datasets (44,652 raw rows; 9/12/14/21/30-day spans, Apr–Jun 2025; 5 services; one check per service per 15-minute interval).
 
