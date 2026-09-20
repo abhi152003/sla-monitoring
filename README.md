@@ -56,10 +56,49 @@ Everything runs from the repository root — it's an npm workspace (`apps/*`, `p
 ```
 apps/web        Next.js dashboard (@sla-monitoring/web)
 apps/worker     Cloudflare Worker (@sla-monitoring/worker)
-packages/shared Shared types/constants (@sla-monitoring/shared)
-packages/ingestion CSV ingestion pipeline — placeholder (@sla-monitoring/ingestion)
+packages/shared Shared types/contracts (@sla-monitoring/shared)
+packages/ingestion CSV processing library (@sla-monitoring/ingestion)
 database/migrations  SQL migrations (empty placeholder)
 ```
+
+### Focused ingestion tests
+
+```bash
+npm test --workspace packages/ingestion          # full ingestion suite
+npx vitest run src/metrics.test.ts               # one file (from packages/ingestion)
+npx vitest run src/datasets.test.ts              # the five-dataset integration suite
+```
+
+## Ingestion library (implementation notes, WO-3)
+
+`@sla-monitoring/ingestion` implements the rules below (R1–R27) as a deterministic, dependency-free TypeScript library. It has no Cloudflare, PostgreSQL, or frontend dependencies.
+
+### Public contract
+
+```ts
+import { processMonitoringCsv } from "@sla-monitoring/ingestion";
+
+const result = processMonitoringCsv(csvTextOrBytes, { fileName: "…" });
+```
+
+`result` is a typed union (`IngestionResult`, defined in `@sla-monitoring/shared`):
+
+- `{ ok: false, error }` — file-level outcomes: `empty_file`, `header_only`, `missing_columns` (all missing names listed), `duplicate_required_headers`, `malformed_csv`.
+- `{ ok: true, outcome, records, rejected, invalidObservations, services, months, overall, report }` — `outcome` is `processed` or `no_valid_intervals` (a typed outcome, not an error). Everything is sorted deterministically: records by (serviceId, timestamp), evidence by row number. Row numbers are one-based CSV record numbers (header = 1, first data row = 2). No metric is ever `NaN`, `Infinity`, or a default `0` — no-denominator fields are `null`.
+
+Processing order is R13: normalize/validate → drop invalid observations (999) → collapse post-normalization exact duplicates → reconcile per (serviceId, 15-minute interval) with the R17/R18 selection order (worst status → highest non-null latency → lexicographically smallest agent; a fully tied set is canonically identical, so output never depends on input row order).
+
+### Count definitions (ProcessingReport)
+
+Every count is defined in the `ProcessingReport` doc-comment in `packages/shared/src/ingestion.ts`. The two subtle ones: `timestampConversions` counts every row whose timestamp parsed into a valid date (by source form), including rows rejected at a later stage than timestamp parsing; `latencyConversions` likewise counts rows with a valid unit and numeric non-negative latency. `lowTrust` is `rejectedRows > 5%` of `rawRows` (R25).
+
+### p95 convention
+
+Nearest-rank: sort ascending, take the value at 1-based rank `ceil(0.95 × n)` (`n = 20 → 19th`, `n = 100 → 95th`, `n = 1 → the sample`). No samples → `null`.
+
+### Verification
+
+Golden summaries for all five datasets were produced by an independent reference implementation of R1–R27 and are asserted in `src/datasets.test.ts` (committed fixture: `test-fixtures/datasets-golden.json`). Incident-log windows are validated as failure clusters (R27) but never used as calculation input.
 
 ---
 
