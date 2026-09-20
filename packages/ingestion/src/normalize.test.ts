@@ -142,10 +142,14 @@ describe("classifyStatus", () => {
 
 describe("statusSeverity", () => {
   it("orders 5xx worse than 4xx worse than 3xx worse than 2xx", () => {
-    const s = (c: number) => statusSeverity(c).join(",");
-    expect(s(503) > s(500)).toBe(true);
-    expect(s(500) > s(404)).toBe(true);
-    expect(s(302) > s(200)).toBe(true);
+    expect(statusSeverity(503)).toBeGreaterThan(statusSeverity(404));
+    expect(statusSeverity(404)).toBeGreaterThan(statusSeverity(302));
+    expect(statusSeverity(302)).toBeGreaterThan(statusSeverity(200));
+  });
+
+  it("treats codes within a class as equally severe", () => {
+    expect(statusSeverity(500)).toBe(statusSeverity(503));
+    expect(statusSeverity(403)).toBe(statusSeverity(404));
   });
 });
 

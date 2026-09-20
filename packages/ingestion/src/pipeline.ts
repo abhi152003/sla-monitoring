@@ -246,10 +246,9 @@ export function reconcile(observations: NormalizedObservation[]): CheckRecord[] 
       const representative = group
         .slice()
         .sort((a, b) => {
-          const [aRank, aCode] = statusSeverity(a.statusCode);
-          const [bRank, bCode] = statusSeverity(b.statusCode);
+          const aRank = statusSeverity(a.statusCode);
+          const bRank = statusSeverity(b.statusCode);
           if (aRank !== bRank) return bRank - aRank; // worse class first
-          if (aCode !== bCode) return bCode - aCode; // higher code first
           const aLat = a.latencyMs ?? Number.NEGATIVE_INFINITY;
           const bLat = b.latencyMs ?? Number.NEGATIVE_INFINITY;
           if (aLat !== bLat) return bLat - aLat; // higher latency first

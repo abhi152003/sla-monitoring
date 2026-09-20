@@ -272,6 +272,27 @@ describe("reconciliation", () => {
     expect(rec[0].observationCount).toBe(2);
   });
 
+  it("codes within the same class tie: latency decides, not the numeric code", () => {
+    // 500 with higher latency vs 503 with lower latency — both failure class,
+    // so the highest-latency observation (500) is the representative.
+    const rec = reconcile([obs(1, 500, 900, "agent-1"), obs(2, 503, 100, "agent-2")]);
+    expect(rec[0].statusCode).toBe(500);
+    expect(rec[0].agent).toBe("agent-1");
+    expect(rec[0].latencyMs).toBe(900);
+    expect(rec[0].status).toBe("failure");
+
+    // Reversed latencies: now 503's observation carries the higher latency.
+    const flipped = reconcile([obs(1, 500, 100, "agent-1"), obs(2, 503, 900, "agent-2")]);
+    expect(flipped[0].statusCode).toBe(503);
+    expect(flipped[0].agent).toBe("agent-2");
+    expect(flipped[0].latencyMs).toBe(900);
+  });
+
+  it("same-class codes with equal latency fall through to the agent tie-break", () => {
+    const rec = reconcile([obs(1, 500, 100, "agent-2"), obs(2, 503, 100, "agent-1")]);
+    expect(rec[0].agent).toBe("agent-1");
+  });
+
   it("a 999 never outvotes a real response: it is removed before reconciliation", () => {
     const r = processMonitoringCsv(
       csv(

@@ -76,3 +76,29 @@ _Delegate: general subagent. Scope: full library + tests + README; independent P
 - Re-verified after edits: lint 0, type-check 0, npm test 0 (108 ingestion tests); R1–R27 section untouched (git diff shows zero rule-line deletions).
 
 ---
+
+## Round 2
+
+_External review: orchestrator verified WO-3 post-push. Verdict: one minor correction required before approval._
+
+### Requirements Alignment
+
+**Blocking:**
+
+- Reconciliation comparator added an undocumented tie-break: `worst class → higher numeric code → highest latency → agent`. R18 and the shared contract specify `worst status → highest latency → agent` — between e.g. 500 (higher latency) and 503 (lower latency), the implementation picked 503 before considering latency, changing the representative status/agent/region.
+
+**Advisory:**
+
+### Resolution
+
+- Removed the numeric-code tie-break: `statusSeverity` now returns the class rank only (codes within a class are equally severe); the comparator follows R18 exactly (class → highest latency → lex agent).
+- Regression tests added: same-class codes with conflicting latencies (both directions), plus equal-latency fall-through to the agent tie-break; `statusSeverity` unit tests updated and a within-class-equality test added.
+- Shared contract comment already matched R18; no spec change needed.
+- Golden dataset results unchanged (111 tests pass) — confirming the removed tie-break never fired on the real data (agents always agreed on codes within multi-observation intervals).
+
+### Round 2 Verdict
+
+- Total blocking: 1 (resolved)
+- **Verdict:** RESOLVED — fix applied and tested; ready for re-verification
+
+---

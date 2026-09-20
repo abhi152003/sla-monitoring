@@ -125,9 +125,9 @@ export function classifyStatus(code: number): StatusClass {
 
 const CLASS_RANK: Record<number, number> = { 2: 0, 3: 1, 4: 2, 5: 3 };
 
-/** Worst-status key: class rank (2xx < 3xx < 4xx < 5xx), then higher code. Higher = worse. */
-export function statusSeverity(code: number): [number, number] {
-  return [CLASS_RANK[Math.floor(code / 100)], code];
+/** Worst-status rank: 2xx < 3xx < 4xx < 5xx. Codes within a class are equally severe. */
+export function statusSeverity(code: number): number {
+  return CLASS_RANK[Math.floor(code / 100)];
 }
 
 export const INTEGER_STATUS_RE = /^\d+$/;
