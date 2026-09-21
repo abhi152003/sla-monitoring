@@ -1,423 +1,175 @@
 # SLA Monitoring Dashboard
 
-Upload a CSV of service health checks, clean it in a stateless Cloudflare Worker, persist the result in Neon PostgreSQL, and expose the stored SLA summary to the Next.js app.
+A single-screen dashboard for service health checks and SLA review.
 
-## Getting Started
+Upload a CSV file to process its records in a Cloudflare Worker. The Worker cleans and reconciles the data, then stores it in PostgreSQL(NeonDB). The dashboard reads the stored data and shows availability, latency, SLA status, data quality, and filterable logs.
+
+## Live deployment
+
+- Dashboard: [sla.abhip.xyz](https://sla.abhip.xyz)
+- Worker API: [sla-monitoring-worker.abhiprajapati011.workers.dev](https://sla-monitoring-worker.abhiprajapati011.workers.dev)
+- Health check: [Worker health endpoint](https://sla-monitoring-worker.abhiprajapati011.workers.dev/health)
+
+The dashboard and health endpoint returned HTTP 200 on **September 21, 2026**. The health endpoint also reported that the database was reachable.
+
+> **Cost constraint:** the current Worker needs the Cloudflare Workers Paid plan. A 30-day upload used 331 ms of CPU, which exceeds the free-tier CPU limit. This deployment does not fully meet the no-cost constraint in the brief. See [What I would improve](#what-i-would-improve).
+
+## What the dashboard shows
+
+The dashboard has 2 sections:
+
+1. A collapsible statistics section shows availability, SLA status, average latency, p95 latency, and data-quality warnings.
+2. A logs section shows the reconciled checks. A user can filter by one date, a date range, a service, or a status.
+
+All date filters use UTC.
+## Architecture
+
+```text
+Browser on Vercel
+    │
+    │ CSV upload and read requests
+    ▼
+Cloudflare Worker
+    ├── validates and parses the CSV
+    ├── normalizes and reconciles observations
+    ├── calculates upload metrics
+    └── writes one atomic transaction
+             │
+             ▼
+       Neon PostgreSQL
+             │
+             │ stored checks and metrics
+             └──────────────► Cloudflare Worker ─► Browser
+```
+
+| Part | Host | Reason |
+| --- | --- | --- |
+| Dashboard | Vercel | It supports the Next.js application and simple deployments. |
+| Processing API | Cloudflare Worker | It provides a deployed stateless function near the client. |
+| Database | Neon PostgreSQL | It provides durable SQL storage and a serverless HTTP driver. |
+| Schema changes | Prisma migrations | They keep database changes repeatable without adding Prisma Client to the Worker. |
+| Shared logic | TypeScript workspaces | They keep API types and ingestion rules consistent across the repository. |
+
+The browser sends the original file to the Worker. It does not clean data or calculate SLA metrics. The Worker calculates a SHA-256 hash for each file and uses it as an idempotency key. An identical upload returns the first stored result.
+
+The Worker stores the upload, reconciled checks, rejected rows, invalid observations, and metrics in one transaction. PostgreSQL is the source of truth for all later queries.
+
+## Data findings and handling
+
+The 5 supplied files contain **44,652 rows**. They cover 9 to 30 days between April 3 and June 1, 2025.
+
+| Finding | Observed result | Handling |
+| --- | --- | --- |
+| Timestamps use UTC, `+05:30`, and Unix seconds. | About 2.2% need conversion. | Convert all valid timestamps to UTC. Reject timestamps outside the 15-minute grid. |
+| `svc-search` reports latency in seconds. | Other services report milliseconds. | Convert all latency values to milliseconds. |
+| Some latency values are empty. | About 1.2% of rows. | Keep the check, store `NULL`, and omit it from latency metrics. |
+| Some latency values are negative. | Exactly 1 row in each file. | Reject the full row because its observation is not trustworthy. |
+| Files contain exact duplicates. | 7 to 25 rows in each file. | Normalize first, then remove duplicates. |
+| Two agents can report the same interval. | 345 to 1,152 intervals in each file. | Store one verdict for each service and 15-minute interval. Keep the evidence for audit. |
+| Agents can disagree. | One `999` and `200` pair occurs. | Remove `999` first. For valid conflicts, use the worst status and highest latency. |
+| Status `999` is not an HTTP response. | Exactly 1 row in each file. | Store it as an invalid observation and exclude it from SLA metrics. |
+| Incident windows match failures and latency spikes. | All supplied incidents match. | Use the incident log only as a check. Never use it as calculation input. |
+| No file covers a full calendar month. | All results are partial. | Calculate the visible result, but do not present it as a final billing verdict. |
+
+The pipeline keeps every rejected row with a reason code. It marks an upload as low trust when rejected rows exceed 5% of total rows.
+
+## SLA rules and assumptions
+
+These choices make the result deterministic and conservative:
+
+- A successful check has a status from 200 through 399.
+- A failed check has a status from 400 through 599.
+- Status `999` is a monitor fault, not a service response.
+- One service can contribute only one result for each 15-minute interval.
+- If valid agents disagree, the worst status wins.
+- The representative latency is the highest valid latency for the interval.
+- Availability is `successful checks / valid reconciled checks`.
+- A service breaches the SLA when availability is strictly below 99.9%.
+- Missing intervals are unknown. They do not count as successes or failures.
+- Monthly calculations use UTC calendar months.
+- Partial months show useful evidence, but they do not define billing credits.
+- p95 uses the nearest-rank method.
+- File order cannot change the result. Stable tie rules select the same record after a shuffle.
+
+The statistics focus on availability, failures, average latency, p95 latency, coverage, and data quality. These values help an on-call engineer find an incident and help a billing reviewer judge the result.
+
+## Run locally
 
 ### Prerequisites
 
-- **Node.js 22 LTS** (current active LTS) and **npm 10+**
-- This codebase requires a Cloudflare Paid plan due the 10ms CPU runtime limitations of Free Tier
+- Node.js 22 or later
+- npm 10 or later
+- A Neon PostgreSQL database
 
-### Install
+### 1. Install dependencies
 
 ```bash
-npm ci        # clean install from the root lockfile (or: npm install)
+npm ci
 ```
 
-Everything runs from the repository root — it's an npm workspace (`apps/*`, `packages/*`) with a single root `package-lock.json`.
+### 2. Configure the web app
 
-### Commands
-
-| Command | What it does |
-| --- | --- |
-| `npm run dev:web` | Next.js dev server → http://localhost:3000 |
-| `npm run dev:worker` | Wrangler dev server for the Worker → http://localhost:8787 |
-| `npm run build` | Build all workspaces (web `next build`, Worker dry-run bundle) |
-| `npm run lint` | ESLint in every workspace that defines a lint script |
-| `npm run type-check` | `tsc --noEmit` in every workspace |
-| `npm test` | Vitest suites (shared, ingestion, and Worker unit tests); gated database/E2E suites run only when their test URL is supplied |
-
-### Local URLs
-
-- **Web app:** http://localhost:3000
-- **Worker health:** http://localhost:8787/health
-
-### Architecture
-
-The request path is:
-
-```
-Next.js web app → Cloudflare Worker → @sla-monitoring/ingestion → Neon PostgreSQL
-       ↑                                      │                         │
-       └──────── persisted upload summary ←────┴──────── atomic transaction
+```bash
+cp apps/web/.env.example apps/web/.env.local
 ```
 
-The Worker accepts one `multipart/form-data` CSV request (field name `file`, maximum 5 MiB), computes a SHA-256 content hash for idempotency, runs the deterministic ingestion library, and persists the reconciled checks, evidence, report, and metrics in one Neon transaction. `GET /uploads/:id` returns the stored summary without reprocessing. The Worker is stateless between requests; Neon is the durable source of truth. The browser origin is reflected only when it exactly matches `ALLOWED_ORIGIN` (never `*`).
+Keep `NEXT_PUBLIC_WORKER_URL=http://localhost:8787` for local use.
 
-The browser sends the original CSV and does not parse, validate, clean, hash,
-reconcile, or calculate metrics. Those operations run authoritatively inside
-the deployed Worker. `wrangler.jsonc` bounds each invocation to 1,000 ms of CPU.
-
-### `/health` response contract
-
-`GET /health` checks both Worker liveness and Neon reachability. A healthy database returns HTTP 200:
-
-```json
-{
-  "status": "ok",
-  "service": "@sla-monitoring/worker",
-  "app": "sla-monitoring",
-  "database": "ok",
-  "timestamp": "2026-09-19T19:55:32.051Z"
-}
-```
-
-When Neon is unreachable, the same shape has `status: "degraded"`, `database: "unreachable"`, and HTTP 503. `timestamp` is ISO-8601 UTC and varies per request. An unknown route returns HTTP 404 with `{"error":"not_found","message":...}`; a recognized path with an unsupported method is rejected rather than treated as an upload.
-
-### Environment
-
-`.env.example` templates live in `apps/web` (Worker base URL) and `apps/worker` (Neon URL plus CORS origin). Copy the web template to `apps/web/.env.local`. For the Worker, copy it to **both** `apps/worker/.env` (Prisma CLI) and `apps/worker/.dev.vars` (Wrangler dev), then fill in the same `DATABASE_URL` and local `ALLOWED_ORIGIN` values. Never commit real credentials.
-
-`DATABASE_URL` is used in two deliberately separate ways:
-
-- Prisma is used only for schema/migration management. `database/schema.prisma` and `database/migrations/` are applied with `prisma migrate deploy`; Prisma Client is not bundled into the Worker.
-- Worker request handling uses the fetch-based `@neondatabase/serverless` client and raw SQL transactions. This keeps the runtime compatible with Cloudflare Workers while keeping migrations reproducible from the Prisma schema.
-
-Initialize a Neon database locally (from the repository root) with:
+### 3. Configure the Worker
 
 ```bash
 cp apps/worker/.env.example apps/worker/.env
 cp apps/worker/.env.example apps/worker/.dev.vars
-# Edit both files with the Neon DATABASE_URL and local ALLOWED_ORIGIN.
+```
+
+Set the same `DATABASE_URL` in both files. Set `ALLOWED_ORIGIN=http://localhost:3000` in `.dev.vars`.
+### 4. Apply the database migrations
+
+```bash
 npm run db:migrate --workspace apps/worker
 ```
 
-The workspace command is the canonical `prisma migrate deploy` invocation and applies every checked-in migration in order. To deploy the Worker, authenticate Wrangler, set the database URL as a secret, configure the browser origin, then deploy:
+### 5. Start both applications
+
+Run these commands in separate terminals:
 
 ```bash
-cd apps/worker
-npx wrangler login
-npx wrangler secret put DATABASE_URL
-npx wrangler deploy
+npm run dev:worker
 ```
-
-`ALLOWED_ORIGIN` is not a database credential: set it to the exact deployed web origin in the production Wrangler `vars`/environment configuration (or store it as a Worker secret after removing the same key from `wrangler.jsonc`). Do not leave the localhost value for a deployed browser client. The deployed `DATABASE_URL` secret must be present before health checks or uploads can succeed.
-
-### Deployed services
-
-- **Dashboard:** [https://sla.abhip.xyz](https://sla.abhip.xyz)
-- **Worker API:** [https://sla-monitoring-worker.abhiprajapati011.workers.dev](https://sla-monitoring-worker.abhiprajapati011.workers.dev)
-- **Health check:** [https://sla-monitoring-worker.abhiprajapati011.workers.dev/health](https://sla-monitoring-worker.abhiprajapati011.workers.dev/health)
-
-The production dashboard runs on Vercel with `NEXT_PUBLIC_WORKER_URL` set to the Worker API above; the Worker's production `ALLOWED_ORIGIN` is `https://sla.abhip.xyz`. Re-deploy after changing the Worker secret or either origin configuration.
-
-### API examples
 
 ```bash
-WORKER_URL=http://localhost:8787
-
-# Liveness and database reachability
-curl -i "$WORKER_URL/health"
-
-# Upload a CSV (the multipart field must be named file)
-curl -i -F "file=@docs/monitoring_checks_9d_seed101.csv" "$WORKER_URL/uploads"
-
-# The 201 response contains upload.id. Retrieve its persisted summary:
-curl -i "$WORKER_URL/uploads/<upload-id>"
-
-# Query persisted metrics and the first page of reconciled checks:
-curl -i "$WORKER_URL/uploads/<upload-id>/stats?from=2025-04-01&to=2025-04-30"
-curl -i "$WORKER_URL/uploads/<upload-id>/checks?page=1&pageSize=50&status=failure"
+npm run dev:web
 ```
 
-`POST /uploads` returns HTTP 201 with `{ "created": true, "upload": ... }` for a new upload. Repeating the identical bytes returns HTTP 200 with `created: false` and the original summary. The endpoint returns 400 for malformed/non-CSV multipart input, 413 above 5 MiB, 409 while identical content is already processing, 422 for an ingestion-level CSV error, and 500 for an unexpected server error. Error bodies use `{ "error": "...", "message": "..." }` and never expose SQL, credentials, or stack traces.
+Open [http://localhost:3000](http://localhost:3000). The local Worker runs at [http://localhost:8787](http://localhost:8787).
 
-### Dashboard read APIs
+## Useful commands
 
-`GET /uploads/:id/stats` and `GET /uploads/:id/checks` read the persisted reconciled checks; they never parse the CSV again or use the stored upload-summary JSON for filtering. Both endpoints accept these optional filters:
-
-| Parameter | Meaning |
+| Command | Result |
 | --- | --- |
-| `date=YYYY-MM-DD` | One complete UTC calendar day. Cannot be combined with `from` or `to`. |
-| `from=YYYY-MM-DD` | Inclusive UTC start date; may be supplied without `to`. |
-| `to=YYYY-MM-DD` | Inclusive UTC end date; may be supplied without `from`. |
-| `serviceId=<id>` | Exact, non-blank service identifier, maximum 128 characters. |
-| `status=success\|failure` | Exact reconciled status. |
+| `npm run dev:web` | Starts the Next.js app on port 3000. |
+| `npm run dev:worker` | Starts the Worker on port 8787. |
+| `npm run build` | Builds all workspaces. |
+| `npm run lint` | Runs ESLint. |
+| `npm run type-check` | Runs the TypeScript checks. |
+| `npm test` | Runs the Vitest suites. |
 
-Date filters use half-open database bounds. A `date` becomes `[00:00:00Z, next-day 00:00:00Z)`; an inclusive `from`/`to` pair becomes `[from 00:00:00Z, day-after-to 00:00:00Z)`. Impossible dates, duplicate/unknown parameters, a reversed range, mixed date forms, blank or oversized service IDs, and unknown statuses return HTTP 400 with `invalid_query`. Unknown uploads return 404. Uploads that exist but are not completed return HTTP 409 with `upload_not_completed`. Query validation runs before the upload lookup, so an invalid query returns 400 even when the upload id is also unknown.
+The test suite covers CSV parsing, normalization, reconciliation, metrics, routes, CORS, database mapping, read APIs, and all 5 supplied datasets.
+## API summary
 
-The checks endpoint additionally accepts positive integer `page` and `pageSize`. Defaults are page 1 and page size 50; the maximum page size is 100. The stats endpoint rejects `page`/`pageSize` with 400 `invalid_query` because it returns aggregates, not pages. Results are stable across ties: timestamp descending, service ID ascending, then database check ID ascending. The response does not include observation evidence:
-
-```json
-{
-  "uploadId": "…",
-  "selectedRange": {
-    "date": null,
-    "from": "2025-04-01",
-    "to": "2025-04-30",
-    "fromInclusive": "2025-04-01T00:00:00.000Z",
-    "toExclusive": "2025-05-01T00:00:00.000Z",
-    "serviceId": null,
-    "status": "failure"
-  },
-  "checks": [
-    {
-      "id": "42",
-      "serviceId": "svc-a",
-      "serviceName": "A API",
-      "timestamp": "2025-04-30T23:45:00.000Z",
-      "statusCode": 503,
-      "status": "failure",
-      "latencyMs": 812.5,
-      "agent": "agent-1",
-      "region": "ap-south-1",
-      "observationCount": 2,
-      "sourceRowNumber": 14402
-    }
-  ],
-  "pagination": {
-    "page": 1,
-    "pageSize": 50,
-    "totalRecords": 3,
-    "totalPages": 1,
-    "hasPreviousPage": false,
-    "hasNextPage": false
-  }
-}
-```
-
-The stats response contains the same `uploadId` and `selectedRange`, an overall metric object, and service metric objects ordered by service ID. Each metric object includes `validChecks`, `successfulChecks`, `failedChecks`, `availabilityRatio`, availability percentage rounded to three decimals, strict breach (`ratio < 0.999`), average and nearest-rank p95 latency rounded to two decimals, and non-null latency sample count. Availability and breach are `null` when no checks match. Average and p95 are `null` when no matching check has latency. Per-service statistics include `serviceId` and `serviceName`.
-
-An explicit date/range result is always marked `partial`, because it is a selected subpopulation rather than a definitive monthly billing verdict. An unfiltered request is non-partial only when the persisted upload range covers complete UTC calendar months from the first `00:00` interval through the final `23:45` interval; otherwise it preserves R23's partial warning. `serviceId`/`status` filters alone do not set `partial`: R23's flag is a time-coverage verdict, so a service- or status-filtered view of a complete month reports `partial: false`.
-
-### Deployed benchmark procedure and results (WO-4)
-
-Benchmarks send each supplied dataset as one multipart `POST /uploads` request to the deployed Worker and measure wall-clock time until the JSON response is received. A replay sends the exact same bytes again and checks for HTTP 200 with `created: false`; `GET /uploads/<id>` is then used to verify persisted retrieval. Results below are the observed wall times supplied with WO-4:
-
-| Dataset/request | Wall time | Reconciled intervals | Outcome |
-| --- | ---: | ---: | --- |
-| 9-day fresh upload | 1.23 s | 4,318 | completed |
-| 12-day fresh upload | 1.57 s | 5,758 | completed |
-| 30-day fresh upload | 1.78 s | 14,398 | completed |
-| 30-day identical replay | 0.87 s | 14,398 (existing) | `created: false` |
-
-The table above records the supplied wall-time observations; CPU telemetry was not captured for those particular runs. A later controlled 30-day run of the semantically same file (1,167,721-byte file, 1,167,950-byte multipart request, 15,577 raw rows, 14,398 intervals; two trailing blank records ignored) captured the following provider metrics:
-
-| Request | Client wall time | Cloudflare wall time | Cloudflare CPU time | Worker persistence log |
-| --- | ---: | ---: | ---: | ---: |
-| 30-day fresh upload, HTTP 201 | 2.018 s | 1,311 ms | 530 ms | 911 ms |
-| Identical replay, HTTP 200 | 0.903 s | 118 ms | 9 ms | not applicable |
-
-The benchmark confirms that the Worker can process the maximum supplied dataset through the authoritative single-request ingestion path. Worker version `16dc69e1-3fe3-419e-a324-5a64154bc11d` passed its production health check with HTTP 200 and Worker and database status `ok`.
-
-The Worker uses a single upload request for each CSV. Separately, the persistence layer batches SQL statements inside the atomic Neon transaction (up to 400 reconciled checks per statement and 250 rejected/invalid evidence rows per statement). SQL statement batching limits query size and database protocol pressure; it does not move parsing or cleaning out of the serverless function.
-
-The deployment was verified on version `16dc69e1-3fe3-419e-a324-5a64154bc11d` with a fresh, semantically identical 30-day source CSV:
-
-| Request | HTTP | Client wall time | Cloudflare wall time | Cloudflare CPU time | Result |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 30-day fresh multipart upload | 201 | 1.771 s | 1,077 ms | 331 ms | 15,577 raw rows; 14,398 reconciled intervals |
-| Persisted `GET /uploads/:id` | 200 | 0.484 s | — | — | Same upload id, content hash, and counts |
-
-Cloudflare reported `outcome: ok`; 331 ms is below the configured 1,000 ms ceiling. The fresh upload id was `3b83c504-fa54-4042-b3f4-d723fddadf2b`. The source fixture received trailing blank records solely to create a fresh SHA-256 identity; R1–R27 correctly ignores trailing blank records, so its semantic result matches the committed 30-day fixture.
-
-### Deployed dashboard API verification (WO-6)
-
-Worker version `3b28952f-aa75-4b1b-99d1-6158e5be9c43` was verified in production against persisted upload `c73fac04-1f4a-4c2f-81c8-19197e3d2fc9`. Health, upload replay, unfiltered statistics, two check pages, a UTC date selection, a service/failure selection, invalid input, an unknown upload, and method rejection all returned their expected HTTP statuses and contracts. The non-empty service/failure selection returned 9 failures and 9 latency samples; the selected UTC day returned 480 checks and `partial: true`.
-
-Representative Cloudflare traces reported `outcome: ok` and 5–11 ms CPU for database-backed statistics and checks requests. The UTC date request spent 12,757 ms waiting on external database/network work but consumed only 5 ms CPU, confirming that it remained below the configured 1,000 ms CPU ceiling. Client-observed warm read requests were otherwise approximately 0.39–0.74 seconds in this verification run.
-
-### Workspace layout
-
-```
-apps/web        Next.js dashboard (@sla-monitoring/web)
-apps/worker     Cloudflare Worker (@sla-monitoring/worker)
-packages/shared Shared types/contracts (@sla-monitoring/shared)
-packages/ingestion CSV processing library (@sla-monitoring/ingestion)
-database/migrations  Prisma SQL migrations applied with `prisma migrate deploy`
-database/schema.prisma Prisma schema used by migration tooling
-```
-
-### Focused ingestion tests
-
-```bash
-npm test --workspace packages/ingestion          # full ingestion suite
-npx vitest run src/metrics.test.ts               # one file (from packages/ingestion)
-npx vitest run src/datasets.test.ts              # the five-dataset integration suite
-```
-
-## Ingestion library (implementation notes, WO-3)
-
-`@sla-monitoring/ingestion` implements the rules below (R1–R27) as a deterministic, dependency-free TypeScript library. It has no Cloudflare, PostgreSQL, or frontend dependencies.
-
-### Public contract
-
-```ts
-import { processMonitoringCsv } from "@sla-monitoring/ingestion";
-
-const result = processMonitoringCsv(csvTextOrBytes, { fileName: "…" });
-```
-
-`result` is a typed union (`IngestionResult`, defined in `@sla-monitoring/shared`):
-
-- `{ ok: false, error }` — file-level outcomes: `empty_file`, `header_only`, `missing_columns` (all missing names listed), `duplicate_required_headers`, `malformed_csv`.
-- `{ ok: true, outcome, records, rejected, invalidObservations, services, months, overall, report }` — `outcome` is `processed` or `no_valid_intervals` (a typed outcome, not an error). Everything is sorted deterministically: records by (serviceId, timestamp), evidence by row number. Row numbers are one-based CSV record numbers (header = 1, first data row = 2). No metric is ever `NaN`, `Infinity`, or a default `0` — no-denominator fields are `null`.
-
-Processing order is R13: normalize/validate → drop invalid observations (999) → collapse post-normalization exact duplicates → reconcile per (serviceId, 15-minute interval) with the R17/R18 selection order (worst status → highest non-null latency → lexicographically smallest agent; a fully tied set is canonically identical, so output never depends on input row order).
-
-### Count definitions (ProcessingReport)
-
-Every count is defined in the `ProcessingReport` doc-comment in `packages/shared/src/ingestion.ts`. The two subtle ones: `timestampConversions` counts every row whose timestamp parsed into a valid date (by source form), including rows rejected at a later stage than timestamp parsing; `latencyConversions` likewise counts rows with a valid unit and numeric non-negative latency. `lowTrust` is `rejectedRows > 5%` of `rawRows` (R25).
-
-### p95 convention
-
-Nearest-rank: sort ascending, take the value at 1-based rank `ceil(0.95 × n)` (`n = 20 → 19th`, `n = 100 → 95th`, `n = 1 → the sample`). No samples → `null`.
-
-### Verification
-
-Golden summaries for all five datasets were produced by an independent reference implementation of R1–R27 and are asserted in `src/datasets.test.ts` (committed fixture: `test-fixtures/datasets-golden.json`). Incident-log windows are validated as failure clusters (R27) but never used as calculation input.
-
----
-
-# Data Cleaning & SLA Calculation Rules
-
-> **Status: Authoritative policy (WO-1).** This document defines the rules that govern CSV ingestion, cleaning, persistence, SLA calculation, and dashboard metrics. Implementation work (parser, worker, database, dashboard) must conform to it. Setup, API, migration, deployment, and benchmark notes live in *Getting Started* above; the deployed Worker URL is recorded there.
-
-**Sources:** `docs/problem_statement.md`, `docs/dataset_incident_log.json`, and a full profiling pass over the five `docs/monitoring_checks_*.csv` datasets (44,652 raw rows; 9/12/14/21/30-day spans, Apr–Jun 2025; 5 services; one check per service per 15-minute interval).
-
-Every rule has an ID (`R1`, `R2`, …) for traceability into tests and code review.
-
----
-
-## 1. Accepted schema and values
-
-**R1 — Required columns.** A CSV is processable only if its header row contains **all eight** of these named columns (any order; matching is by column name, not position):
-
-```
-service_id, service_name, timestamp, status_code, latency, latency_unit, agent, region
-```
-
-A file missing any of the eight is rejected in full with an explicit error. **Extra columns are allowed and ignored** — the eight required columns must be present; the header may contain more.
-
-**R2 — Field validity (per row).**
-
-| Field | Rule |
+| Method and path | Purpose |
 | --- | --- |
-| `service_id` | Non-empty string. The `service_id → service_name` mapping must be unambiguous within a file, resolved **deterministically and independent of row order**: the most frequent `(service_id, service_name)` pair per `service_id` is authoritative; rows carrying any other `service_name` for that `service_id` are rejected with reason code `inconsistent_service_name`. If two mappings tie exactly in frequency for a `service_id`, **all** rows for that `service_id` are rejected as ambiguous. (*No mapping conflicts observed in the five datasets.*) |
-| `timestamp` | Non-empty; must parse under one of the forms in §2. |
-| `status_code` | Integer. Classification per §5. |
-| `latency`, `latency_unit` | Per §3. `latency_unit` ∈ {`ms`, `s`}; anything else rejects the row. |
-| `agent`, `region` | Non-empty strings; informational (they never affect SLA math directly, only reconciliation per §6). |
+| `GET /health` | Checks the Worker and database. |
+| `POST /uploads` | Accepts one CSV file in the `file` multipart field. The limit is 5 MiB. |
+| `GET /uploads/:id` | Gets a stored upload summary. |
+| `GET /uploads/:id/stats` | Gets stored statistics with optional filters. |
+| `GET /uploads/:id/checks` | Gets a page of stored checks with optional filters. |
 
-**R3 — Known vocabulary (observed, not enforced as closed).** Services: `svc-auth`/auth-api, `svc-payments`/payments-api, `svc-search`/search-api, `svc-reports`/reports-api, `svc-notify`/notify-worker. Agents: `agent-1`, `agent-2`. Region: `ap-south-1`. New agents/regions/services are accepted as valid data (open registry) — they are keys and labels, not validity criteria. Only the `service_id/service_name` consistency check (R2) is enforced.
+Read endpoints accept `date`, `from`, `to`, `serviceId`, and `status`. The checks endpoint also accepts `page` and `pageSize`. The maximum page size is 100.
 
-**R4 — Structural malformation.** A row with the wrong number of fields, a non-integer `status_code`, or an unparseable `timestamp` is **rejected** (never silently dropped): it is stored in a rejected-records report with a reason code and excluded from all metrics (see §8).
+## What I would improve
 
-## 2. Timestamp normalization → UTC
+With more time, I would:
 
-Three forms occur in the data; all are accepted and normalized to UTC `YYYY-MM-DDTHH:mm:00Z`:
-
-**R5 — ISO 8601 UTC (`…Z`)** is taken as-is (97–98% of rows).
-
-**R6 — ISO 8601 with numeric offset** (observed: `+05:30` only, ~0.5–0.8%) is converted to UTC by applying the offset. Example: `2025-04-10T05:45:00+05:30` → `2025-04-10T00:15:00Z`.
-
-**R7 — Unix epoch**: 10 digits = seconds, 13 digits = milliseconds since epoch, interpreted as UTC (~1–1.5% of rows). Any other digit-length is rejected (R4). Example: `1744349400` → `2025-04-11T05:30:00Z`.
-
-**R8 — Grid conformance.** After normalization, every timestamp must land on the 15-minute grid (`second == 0`, `minute ∈ {00, 15, 30, 45}`). Off-grid timestamps are rejected (R4): a legitimate health check from this pipeline cannot occur between intervals, and rounding would fabricate data. *Evidence: 0 of 44,652 rows violate this after normalization.*
-
-## 3. Latency normalization → milliseconds
-
-**R9 — Unit conversion.** `latency_unit == "s"` → multiply by 1000; `"ms"` → as-is. Store as numeric milliseconds (2 decimal places). Note: `svc-search` reports exclusively in seconds; all other services in milliseconds — normalization makes them comparable.
-
-**R10 — Missing latency.** An **empty** latency value (observed: ~1.2% of rows) does **not** invalidate the row: availability depends on `status_code`, not latency. Latency is stored as `NULL` and the row is excluded from latency aggregates (average, p95) — never counted as `0`. A **non-empty but non-numeric** latency (e.g. `N/A`; none observed) rejects the whole record under R11's invalid-latency handling.
-
-**R11 — Invalid latency is a rejected record.** A non-numeric (non-empty) or physically impossible — negative — latency (observed: exactly 1 negative per file, always `status 200`) indicates a malfunctioning agent observation; we do not trust its status verdict either. The whole row is rejected: removed from all metrics and written to the rejected-records report with reason code `invalid_latency`. *Caveat documented: rejecting a successful check slightly lowers measured availability (`(N−1)/(D−1) < N/D` when `N < D`); one record per dataset is immaterial, and trustworthiness wins.*
-
-## 4. Duplicate handling
-
-**R12 — Exact duplicates.** Rows identical across all fields **after normalization** (R5–R9) are collapsed to one; the first occurrence wins. Raw-string equality is not sufficient — the same observation may appear once as `Z`-form and once as epoch. *Observed: 7–25 exact duplicates per file.*
-
-**R13 — Pipeline order.** Normalization (R5–R9) → invalid-observation discard (R15: 999; R11: invalid latency) → exact-duplicate collapse (R12) → multi-agent reconciliation (§6). Discarding invalid observations **before** reconciliation guarantees a monitor-side sentinel can never outvote a real HTTP response. Each stage logs how many rows it removed.
-
-## 5. Record classification by status code
-
-**R14 — Classification table.**
-
-| Status | Class | Effect |
-| --- | --- | --- |
-| `2xx` (200 observed) | **Success** | Counts in numerator and denominator. |
-| `3xx` | **Success** | A redirect is a live response from the service. (None observed.) |
-| `4xx`, `5xx` (500, 502, 503 observed) | **Failure** | Counts in denominator only — this is the outage signal. |
-| `999` | **Invalid observation** | Excluded from the denominator; counted as a data-quality warning. |
-| Malformed per R4 | **Rejected** | Excluded from all metrics; kept in the rejected-records report. |
-
-**R15 — Rationale for 999.** `999` is a sentinel for "agent could not complete the check" (timeout, network error at the monitor, DNS) — it is not an HTTP response from the service. Treating it as a failure would penalize the service for the *monitor's* failure; treating it as success would hide potential outages. Excluding it from the denominator while surfacing it as a warning is the honest middle ground. *Observed: exactly one 999 per file — impact is negligible either way, which makes the conservative choice safe.*
-
-## 6. Multi-agent reconciliation (no double-counted intervals)
-
-Two agents (agent-1, agent-2) sometimes report the **same service + interval** (observed: 345–1,152 multi-observation intervals per file after dedup — the reason raw row counts exceed `days × 96 × 5`).
-
-**R16 — One verdict per (service_id, normalized timestamp).** After R12 collapse, all surviving **valid** observations for the same interval are reconciled into exactly one check record (invalid observations were already discarded at R13).
-
-**R17 — Worst-case status wins.** If agents disagree on status for an interval, the interval counts as **failed**. Rationale: when one monitor observes a failure, the burden of proof is on success; availability must never look better because a second probe got lucky. *Observed: exactly 1 disagreement in the shipped data (14-day file) — a `999`-vs-`200` pair, which R13 resolves by discarding the `999` first; no valid-vs-valid conflict occurs in the data. The rule governs genuine conflicts (e.g. `200` vs `500`).*
-
-**R18 — Representative latency = max.** For a reconciled interval, store the maximum latency among its valid observations (worst customer-visible experience) and the number of observations. The surviving agent/region fields come from the worst-status **valid** observation; if several observations share the worst status, the **highest-latency** one supplies agent/region (consistent with the worst-case policy), and any remaining tie is broken by the lexicographically smallest agent identifier — fully deterministic. The full observation set is retained for audit.
-
-## 7. SLA calculation
-
-**R19 — Valid-check denominator.** `D` = number of reconciled check records (§6) for the service in the window, excluding invalid (999) and rejected (R4, R11) records.
-
-**R20 — Successful-check numerator.** `N` = subset of `D` classified Success (R14).
-
-**R21 — Availability.** `availability = N / D`, displayed as a percentage to 3 decimals (e.g. 99.956%). A single check is worth `1/D` of the month.
-
-**R22 — SLA comparison.** The SLA target is **99.9% monthly availability**. `breached ⇔ availability < 99.9` strictly (99.900% exactly = compliant). Breach → billing-credit event, shown in the dashboard. For scale: a 30-day month has 2,880 intervals; 99.9% tolerates at most 2 failed checks (3 failures = 99.896% = breach).
-
-**R23 — Windowing.** Availability is computed per **service × calendar month** (UTC). A dataset that only partially covers a month is computed over its covered intervals and **flagged `partial`** — the dashboard must not present a partial month as a definitive SLA verdict, since the brief's credit language assumes a full month. Whole-dataset availability is additionally shown as the headline number for an upload.
-
-## 8. Metrics integrity: missing checks, rejected records, partial ranges
-
-**R24 — Missing checks (grid gaps).** Expected grid per service = every 15-min step from min to max normalized timestamp. An interval with no accepted observation is **excluded from the denominator** (unknown ≠ failure) and reported as a **coverage metric** (`coverage = observed intervals / expected grid`). Rationale: a monitoring blackout must not auto-breach the SLA. *Observed: 0 gaps in all five datasets after normalization — this rule is a safeguard, not a correction.*
-
-**R25 — Rejected records.** Every rejection (R4, R11) is counted and surfaced in the UI (`rejected: n, reasons: …`), never silently discarded. If rejected records exceed **5%** of raw rows, the upload is flagged **low-trust** in the dashboard.
-
-**R26 — Partial date ranges.** Filters (single date or range) in the logs view recompute nothing silently: filtering to a sub-range shows that range's own N/D but labels it `partial` per R23 semantics and shows interval counts so the reader can judge significance.
-
-**R27 — Incident cross-check (sanity, not input).** `dataset_incident_log.json` windows must appear as 5xx clusters with elevated latency (confirmed in profiling: latency rises ~4–5× above service baseline inside incident windows, up to ~3s for high-baseline services). The incident log is never an input to SLA math — only a validation aid; disagreement is surfaced as a data-quality note.
-
-## 9. Data findings summary (observed evidence → rule)
-
-| # | Finding (all five CSVs) | Magnitude | Handled by |
-| --- | --- | --- | --- |
-| 1 | Timestamps in 3 forms: `Z`, `+05:30` offset, epoch-seconds | ~2.2% (offset + epoch) | R6, R7 |
-| 2 | `svc-search` reports latency in seconds, others in ms | 100% of svc-search rows | R9 |
-| 3 | Empty latency values | ~1.2% of rows | R10 |
-| 4 | Negative latency (always status 200) | exactly 1/file | R11 |
-| 5 | Exact duplicate rows (incl. post-normalization) | 7–25/file | R12 |
-| 6 | agent-1/agent-2 both report same interval | 345–1,152 intervals/file | R16–R18 |
-| 7 | Agents disagree on status for one interval (999 vs 200; resolved by R13 ordering) | 1 (14d file) | R17 |
-| 8 | Sentinel status `999` | exactly 1/file | R15 |
-| 9 | No malformed rows, no off-grid timestamps, no grid gaps | 0 | R4, R8, R24 (safeguards) |
-| 10 | Incident-log windows match 5xx clusters + latency spikes | all logged incidents | R27 |
-| 11 | Datasets span 9–30 days, never full calendar months | all files | R23, R26 |
-
-### Supplied dataset coverage map (UTC)
-
-Exact per-file check ranges (parsed across all timestamp forms, R5–R7; every file runs on the 15-minute grid from a day's first `00:00` slot to its last `23:45` slot), in chronological order:
-
-| Dataset | Rows | First → last check (UTC) |
-| --- | ---: | --- |
-| `monitoring_checks_21d_seed303.csv` | 10,904 | 2025-04-03 00:00 → 2025-04-23 23:45 |
-| `monitoring_checks_30d_seed404.csv` | 15,577 | 2025-04-06 00:00 → 2025-05-05 23:45 |
-| `monitoring_checks_12d_seed505.csv` | 6,230 | 2025-04-10 00:00 → 2025-04-21 23:45 |
-| `monitoring_checks_9d_seed101.csv` | 4,672 | 2025-05-08 00:00 → 2025-05-16 23:45 |
-| `monitoring_checks_14d_seed202.csv` | 7,269 | 2025-05-19 00:00 → 2025-06-01 23:45 |
-| **Union** | **44,652** | **2025-04-03 00:00 → 2025-06-01 23:45** (60-day envelope) |
-
-Observations on the union:
-
-- **The envelope is not continuous.** The April files overlap (21d ∩ 30d on Apr 6–23; 12d sits entirely inside both), but May has two holes with no checks from any file: **May 6–7** (last check May 5 23:45Z, next May 8 00:00Z) and **May 17–18** (last check May 16 23:45Z, next May 19 00:00Z). May coverage is 27 of 31 days.
-- **No complete calendar month exists in any combination of the files.** April is missing Apr 1–2 (union starts Apr 3), June has only Jun 1, and May is missing four days (6, 7, 17, 18). Consequently every upload of these datasets reports `partial: true` under R23 — the flag is expected behavior, not a data or pipeline error.
-- **Endpoint semantics.** `isCompleteUploadRange` decides non-partial from the persisted range *endpoints* only (first check at a month's 1st `00:00Z`, last check at that month's final `23:45Z` slot); interior grid holes do not set `partial` — they surface as per-service coverage metrics under R24. Even so, no merge of these files satisfies the endpoints (the natural May-bounded merge of 30d + 9d + 14d trimmed to May 1 → May 31 would pass the endpoint check with its four interior days missing, illustrating the difference between the two signals).
-
-## 10. Assumptions
-
-- **A1:** One check per service per 15-minute interval is the intended cadence (stated in the brief; confirmed — all timestamps land on the grid after normalization).
-- **A2:** All timestamps, once UTC-normalized, are directly comparable across agents and files (single-region data; no clock-skew correction is attempted).
-- **A3:** "Monthly availability" for the credit comparison is per calendar month (R23); uploads covering partial months are shown but flagged.
-- **A4:** `999` is a monitor-side sentinel, not a service response (R15).
-- **A5:** Worst-case reconciliation (R17) is the correct reading of "trustworthy": availability may under-report, never over-report.
-- **A6:** Latency is a secondary signal (dashboard stats only); it never affects availability math.
-- **A7:** The 5% rejected-records low-trust threshold (R25) is a pragmatic guardrail: observed rejection rate is ~0.05% of rows (≈2/file: one 999 + one invalid latency), so 5% flags gross pipeline breakage, not borderline noise.
-- **A8:** Rules must be deterministic and independent of row order (R2 majority mapping with reject-on-tie; R18 worst-status → highest-latency → lexicographic tie-break), so re-running the pipeline on shuffled input yields identical results.
+1. Store each uploaded file in object storage, then process fixed-size row batches in separate function calls. Store intermediate results in staging tables, and publish the upload only after all batches succeed. If this design still exceeds the free limit, move the function to a provider with a larger free CPU allowance.
+2. Stream the CSV parser and database writes. This change would reduce peak memory use for files larger than the supplied data.
