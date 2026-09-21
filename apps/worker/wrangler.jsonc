@@ -11,6 +11,6 @@
     "enabled": true
   },
   "vars": {
-    "ALLOWED_ORIGIN": "http://localhost:3000"
+    "ALLOWED_ORIGIN": "https://sla.abhip.xyz"
   }
 }
