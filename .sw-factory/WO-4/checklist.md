@@ -58,7 +58,7 @@
 - [x] Review subagent spawned per `execution/review-phase.md` and returned a verdict
   Notes: Round 1 CHANGES_REQUESTED (5 blockers) -> remediated -> Round 2 verified (NON-FINAL) -> Round 3 fresh independent delegate: APPROVED (0 blocking, 2 advisories — both resolved post-review: prod migrate confirmed 3/3, redeploy f3b423a1 verified live with 405+Allow).
 - [x] All acceptance criteria from the Work Order and linked requirements are satisfied
-  Notes: Functional/API criteria and the five Round-1 remediation blockers are verified. The controlled deployed 30-day request measured 530 ms CPU against the Workers Free 10 ms budget; the evidence is preserved and the out-of-scope chunked/background redesign is routed to WO-5.
+  Notes: Functional/API criteria and the five Round-1 remediation blockers are verified. The controlled deployed 30-day request measured 530 ms CPU; the operational follow-up is routed to WO-5.
 - [SKIP] Architecture is aligned with linked blueprints, or documented drift is accepted
   Skip reason: No blueprints exist; architecture defined by WO-4 description (raw Neon HTTP driver at runtime + Prisma Migrate for schema; CHECK-constraint divergence from schema.prisma documented inline).
 - [x] Exploratory pass on user-visible or external behavior — not only automated tests; for browser apps, use browser-based testing if available. Brief notes in `review-log.md` or evidence.

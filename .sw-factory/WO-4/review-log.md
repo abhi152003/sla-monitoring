@@ -108,7 +108,7 @@ The implementation team has acknowledged these findings and remediation is under
 
 **Blocking:**
 
-- None identified in this round. The controlled deployed 30-day upload measured 530 ms Cloudflare CPU time, above the Workers Free 10 ms CPU budget. Per WO-4 scope, this evidence is preserved and routed to a separate WO-5 chunked/background-ingestion redesign; it is not a blocker to the completed single-request WO-4 behavior.
+- None identified in this round. The controlled deployed 30-day upload measured 530 ms Cloudflare CPU time. This evidence is preserved and routed to WO-5 as an operational follow-up; it is not a blocker to the completed single-request WO-4 behavior.
 
 **Advisory:**
 
@@ -139,7 +139,7 @@ The implementation team has acknowledged these findings and remediation is under
 
 ### Follow-up status
 
-The five Round-1 blockers are resolved and verified. WO-5 — Move CSV ingestion off the Workers Free request CPU path (`ec4ff265-9881-45a7-944e-4e700d998fe3`, Backlog; child of WO-4) owns the chunked/background redesign for the 530 ms CPU path; statement batching is not upload chunking and does not solve this CPU-budget constraint. Because chunking is outside WO-4 scope, the benchmark overage is not a WO-4 blocker. This corrected Round 2 record is non-final and does not approve WO-4; a fresh independent review must provide the final verdict.
+The five Round-1 blockers are resolved and verified. WO-5 — Configure the server-side CSV ingestion CPU budget (`ec4ff265-9881-45a7-944e-4e700d998fe3`, In Review; child of WO-4) owns the operational follow-up for the 530 ms CPU path. This Round 2 record is non-final and does not approve WO-4; a fresh independent review must provide the final verdict.
 
 ---
 

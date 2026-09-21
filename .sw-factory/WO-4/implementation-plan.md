@@ -4,7 +4,7 @@
 
 Deployed vertical slice: multipart CSV upload → Worker → `processMonitoringCsv` (unchanged) → Neon PostgreSQL persistence (hash-idempotent, atomic) → retrievable upload summary. Includes health-with-DB-check, CORS, full test layers, migration/schema verification, dataset benchmarks, and an evidence-based routing decision for any out-of-scope chunking work.
 
-**Follow-up delivery:** WO-5 — Move CSV ingestion off the Workers Free request CPU path (`ec4ff265-9881-45a7-944e-4e700d998fe3`, Backlog; child of WO-4) owns the chunked/background redesign triggered by the 530 ms deployed CPU observation.
+**Follow-up delivery:** WO-5 — Configure the server-side CSV ingestion CPU budget (`ec4ff265-9881-45a7-944e-4e700d998fe3`, In Review; child of WO-4) owns the operational follow-up triggered by the 530 ms deployed CPU observation.
 
 ## Code Reuse And Package Structure
 

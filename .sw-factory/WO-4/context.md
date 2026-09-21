@@ -21,4 +21,4 @@ Blueprints reached through `@…` mentions and links while reading linked bluepr
 
 - Branch:
 - Pull Request URL:
-- Follow-up work order: WO-5 — Move CSV ingestion off the Workers Free request CPU path (`ec4ff265-9881-45a7-944e-4e700d998fe3`, Backlog; child of WO-4). The 530 ms deployed CPU observation is its triggering evidence; chunked/background ingestion is outside WO-4 scope.
+- Follow-up work order: WO-5 — Configure the server-side CSV ingestion CPU budget (`ec4ff265-9881-45a7-944e-4e700d998fe3`, In Review; child of WO-4). The 530 ms deployed CPU observation is its triggering evidence.

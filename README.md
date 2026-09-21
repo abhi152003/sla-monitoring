@@ -7,6 +7,7 @@ Upload a CSV of service health checks, clean it in a stateless Cloudflare Worker
 ### Prerequisites
 
 - **Node.js 22 LTS** (current active LTS) and **npm 10+**
+- This codebase requires a Cloudflare Paid plan due the 10ms CPU runtime limitations of Free Tier
 
 ### Install
 
@@ -43,6 +44,10 @@ Next.js web app → Cloudflare Worker → @sla-monitoring/ingestion → Neon Pos
 ```
 
 The Worker accepts one `multipart/form-data` CSV request (field name `file`, maximum 5 MiB), computes a SHA-256 content hash for idempotency, runs the deterministic ingestion library, and persists the reconciled checks, evidence, report, and metrics in one Neon transaction. `GET /uploads/:id` returns the stored summary without reprocessing. The Worker is stateless between requests; Neon is the durable source of truth. The browser origin is reflected only when it exactly matches `ALLOWED_ORIGIN` (never `*`).
+
+The browser sends the original CSV and does not parse, validate, clean, hash,
+reconcile, or calculate metrics. Those operations run authoritatively inside
+the deployed Worker. `wrangler.jsonc` bounds each invocation to 1,000 ms of CPU.
 
 ### `/health` response contract
 
@@ -131,9 +136,18 @@ The table above records the supplied wall-time observations; CPU telemetry was n
 | 30-day fresh upload, HTTP 201 | 2.018 s | 1,311 ms | 530 ms | 911 ms |
 | Identical replay, HTTP 200 | 0.903 s | 118 ms | 9 ms | not applicable |
 
-The fresh upload succeeded, but its 530 ms CPU time is well above the Cloudflare Workers Free documented 10 ms CPU budget. The result is preserved as deployment evidence and is routed to WO-5 for a chunked/background redesign. Chunking is outside WO-4's single-request ingestion scope, so this measurement does not invalidate the completed WO-4 API behavior; it does mean that behavior must not be represented as reliably free-tier safe.
+The benchmark confirms that the Worker can process the maximum supplied dataset through the authoritative single-request ingestion path. Worker version `16dc69e1-3fe3-419e-a324-5a64154bc11d` passed its production health check with HTTP 200 and Worker and database status `ok`.
 
-The Worker currently uses a single upload request for each CSV. Separately, the persistence layer batches SQL statements inside the atomic Neon transaction (up to 400 reconciled checks per statement and 250 rejected/invalid evidence rows per statement). SQL statement batching limits query size and database protocol pressure; it is not client upload chunking, resumable upload support, or a workaround for the Worker CPU budget. Upload chunking changes the request/processing lifecycle, while statement batching only changes how an already-ingested result is written.
+The Worker uses a single upload request for each CSV. Separately, the persistence layer batches SQL statements inside the atomic Neon transaction (up to 400 reconciled checks per statement and 250 rejected/invalid evidence rows per statement). SQL statement batching limits query size and database protocol pressure; it does not move parsing or cleaning out of the serverless function.
+
+The deployment was verified on version `16dc69e1-3fe3-419e-a324-5a64154bc11d` with a fresh, semantically identical 30-day source CSV:
+
+| Request | HTTP | Client wall time | Cloudflare wall time | Cloudflare CPU time | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 30-day fresh multipart upload | 201 | 1.771 s | 1,077 ms | 331 ms | 15,577 raw rows; 14,398 reconciled intervals |
+| Persisted `GET /uploads/:id` | 200 | 0.484 s | — | — | Same upload id, content hash, and counts |
+
+Cloudflare reported `outcome: ok`; 331 ms is below the configured 1,000 ms ceiling. The fresh upload id was `3b83c504-fa54-4042-b3f4-d723fddadf2b`. The source fixture received trailing blank records solely to create a fresh SHA-256 identity; R1–R27 correctly ignores trailing blank records, so its semantic result matches the committed 30-day fixture.
 
 ### Workspace layout
 
