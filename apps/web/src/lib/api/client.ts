@@ -43,7 +43,9 @@ async function requestJson(path: string, init: RequestInit, params?: URLSearchPa
   let response: Response;
   try {
     response = await fetch(buildUrl(path, params), init);
-  } catch {
+  } catch (error) {
+    // Not-configured throws synchronously out of buildUrl; it is not a network failure.
+    if (error instanceof ApiClientError) throw error;
     throw ApiClientError.network();
   }
 
@@ -70,11 +72,14 @@ export async function fetchHealth(signal?: AbortSignal): Promise<HealthCheckResp
   let response: Response;
   try {
     response = await fetch(buildUrl("/health"), { signal, headers: ACCEPT_JSON });
-  } catch {
+  } catch (error) {
+    if (error instanceof ApiClientError) throw error;
     throw ApiClientError.network();
   }
   const body = await readJsonBody(response);
-  if (body !== null && typeof body === "object" && typeof (body as { status?: unknown }).status === "string") {
+  const status =
+    body !== null && typeof body === "object" ? (body as { status?: unknown }).status : undefined;
+  if (status === "ok" || status === "degraded") {
     return body as HealthCheckResponse;
   }
   if (!response.ok) {

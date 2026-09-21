@@ -2,6 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
+import { ApiClientError } from "@/lib/api/errors";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -9,7 +10,10 @@ export function Providers({ children }: { children: ReactNode }) {
       new QueryClient({
         defaultOptions: {
           queries: {
-            retry: 1,
+            // One retry for transient failures; definitive API errors (non-retryable
+            // ApiClientError) surface immediately instead of retrying pointlessly.
+            retry: (failureCount, error) =>
+              failureCount < 1 && !(error instanceof ApiClientError && !error.retryable),
             refetchOnWindowFocus: false,
             staleTime: 30_000,
           },

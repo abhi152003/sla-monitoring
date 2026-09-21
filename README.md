@@ -94,12 +94,13 @@ npx wrangler deploy
 
 `ALLOWED_ORIGIN` is not a database credential: set it to the exact deployed web origin in the production Wrangler `vars`/environment configuration (or store it as a Worker secret after removing the same key from `wrangler.jsonc`). Do not leave the localhost value for a deployed browser client. The deployed `DATABASE_URL` secret must be present before health checks or uploads can succeed.
 
-### Deployed Worker
+### Deployed services
 
+- **Dashboard:** [https://sla.abhip.xyz](https://sla.abhip.xyz)
 - **Worker API:** [https://sla-monitoring-worker.abhiprajapati011.workers.dev](https://sla-monitoring-worker.abhiprajapati011.workers.dev)
 - **Health check:** [https://sla-monitoring-worker.abhiprajapati011.workers.dev/health](https://sla-monitoring-worker.abhiprajapati011.workers.dev/health)
 
-Set `NEXT_PUBLIC_WORKER_URL` to the Worker API URL in the web deployment. Re-deploy after changing the Worker secret or production `ALLOWED_ORIGIN` configuration.
+The production dashboard runs on Vercel with `NEXT_PUBLIC_WORKER_URL` set to the Worker API above; the Worker's production `ALLOWED_ORIGIN` is `https://sla.abhip.xyz`. Re-deploy after changing the Worker secret or either origin configuration.
 
 ### API examples
 

@@ -173,7 +173,7 @@ export function StatisticsSection({
 
             <div>
               <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Overall (selected range)
+                Overall
               </h3>
               <dl className="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <MetricCard label="Valid checks" value={formatCount(stats.overall.validChecks)} />
@@ -209,11 +209,11 @@ export function StatisticsSection({
 
             <div>
               <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Per service (selected range)
+                Per service
               </h3>
               {stats.services.length === 0 ? (
                 <p className="mt-2 text-sm text-muted-foreground">
-                  No services match the current filters.
+                  No services found in this dataset.
                 </p>
               ) : (
                 <div className="mt-2 grid gap-3 md:grid-cols-2 xl:grid-cols-3">

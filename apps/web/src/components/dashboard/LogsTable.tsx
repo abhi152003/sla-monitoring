@@ -68,7 +68,11 @@ export function LogsTable({
           ) : null}
         </div>
         <p role="status" aria-live="polite" className="font-mono text-xs tabular-nums text-muted-foreground">
-          {data ? `${formatCount(pagination?.totalRecords ?? 0)} matching records` : "Loading records…"}
+          {data
+            ? `${formatCount(pagination?.totalRecords ?? 0)} matching records`
+            : error
+              ? "Records unavailable"
+              : "Loading records…"}
         </p>
       </div>
 
