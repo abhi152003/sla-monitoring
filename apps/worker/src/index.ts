@@ -2,6 +2,8 @@ import { allowedMethods, isKnownPath, matchRoute } from "./routes";
 import { handleHealth } from "./handlers/health";
 import { handleUpload } from "./handlers/upload";
 import { handleGetUpload } from "./handlers/getUpload";
+import { handleGetChecks } from "./handlers/getChecks";
+import { handleGetStats } from "./handlers/getStats";
 import { apiError, internalError } from "./api/errors";
 import { jsonResponse, preflightResponse } from "./api/respond";
 import { setEnv, type WorkerEnv } from "./env";
@@ -22,6 +24,10 @@ export default {
           return await handleUpload(request);
         case "getUpload":
           return await handleGetUpload(route.id, request);
+        case "getChecks":
+          return await handleGetChecks(route.id, request);
+        case "getStats":
+          return await handleGetStats(route.id, request);
         default: {
           const code = isKnownPath(url.pathname) ? "method_not_allowed" : "not_found";
           const err = apiError(

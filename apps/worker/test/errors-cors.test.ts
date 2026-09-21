@@ -6,12 +6,14 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("apiError", () => {
   it("maps every code to its documented HTTP status", () => {
+    expect(apiError("invalid_query", "x").status).toBe(400);
     expect(apiError("malformed_request", "x").status).toBe(400);
     expect(apiError("invalid_file", "x").status).toBe(400);
     expect(apiError("payload_too_large", "x").status).toBe(413);
     expect(apiError("not_found", "x").status).toBe(404);
     expect(apiError("method_not_allowed", "x").status).toBe(405);
     expect(apiError("upload_conflict", "x").status).toBe(409);
+    expect(apiError("upload_not_completed", "x").status).toBe(409);
     expect(apiError("invalid_csv", "x").status).toBe(422);
     expect(apiError("internal_error", "x").status).toBe(500);
   });

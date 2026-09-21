@@ -11,12 +11,19 @@ describe("matchRoute", () => {
   it("routes GET /uploads/:id and captures the id", () => {
     expect(matchRoute("GET", "/uploads/abc-123")).toEqual({ handler: "getUpload", id: "abc-123" });
   });
+  it("routes upload statistics and checks", () => {
+    expect(matchRoute("GET", "/uploads/abc-123/stats")).toEqual({ handler: "getStats", id: "abc-123" });
+    expect(matchRoute("GET", "/uploads/abc-123/checks")).toEqual({ handler: "getChecks", id: "abc-123" });
+  });
   it("rejects wrong methods and unknown paths", () => {
     expect(matchRoute("POST", "/health")).toBeNull();
     expect(matchRoute("GET", "/uploads")).toBeNull();
     expect(matchRoute("DELETE", "/uploads/abc")).toBeNull();
     expect(matchRoute("GET", "/uploads/abc/children")).toBeNull();
     expect(matchRoute("GET", "/nope")).toBeNull();
+    expect(matchRoute("POST", "/uploads/abc-123/stats")).toBeNull();
+    expect(matchRoute("DELETE", "/uploads/abc-123/checks")).toBeNull();
+    expect(matchRoute("PUT", "/uploads/abc-123/stats")).toBeNull();
   });
 });
 
@@ -25,6 +32,9 @@ describe("isKnownPath", () => {
     expect(isKnownPath("/health")).toBe(true);
     expect(isKnownPath("/uploads")).toBe(true);
     expect(isKnownPath("/uploads/abc")).toBe(true);
+    expect(isKnownPath("/uploads/abc/stats")).toBe(true);
+    expect(isKnownPath("/uploads/abc/checks")).toBe(true);
+    expect(isKnownPath("/uploads/abc/evidence")).toBe(false);
     expect(isKnownPath("/missing")).toBe(false);
   });
 });
@@ -34,6 +44,8 @@ describe("allowedMethods", () => {
     expect(allowedMethods("/health")).toBe("GET, OPTIONS");
     expect(allowedMethods("/uploads")).toBe("POST, OPTIONS");
     expect(allowedMethods("/uploads/abc")).toBe("GET, OPTIONS");
+    expect(allowedMethods("/uploads/abc/stats")).toBe("GET, OPTIONS");
+    expect(allowedMethods("/uploads/abc/checks")).toBe("GET, OPTIONS");
     expect(allowedMethods("/missing")).toBeNull();
   });
 });

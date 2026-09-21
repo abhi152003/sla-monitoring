@@ -259,4 +259,246 @@ describe.skipIf(!TEST_DB)("database integration", () => {
     expect(summary.months).toBeTruthy();
     expect(summary.completedAt).toBeTruthy();
   });
+
+  it("filters, paginates, and computes metrics from persisted reconciled checks", async () => {
+    const { findPriorAttempt } = await import("../src/db/persistUpload");
+    const { parseCheckQuery } = await import("../src/api/query");
+    const { queryChecks, queryStats, requireCompletedUpload } = await import("../src/db/readChecks");
+    const prior = await findPriorAttempt(contentHash);
+    if (prior.kind !== "completed") throw new Error("expected completed upload");
+    await requireCompletedUpload(prior.id);
+
+    const all = parseCheckQuery(new URLSearchParams("page=1&pageSize=1"), true);
+    const first = await queryChecks(prior.id, all);
+    expect(first.pagination).toMatchObject({ totalRecords: 2, totalPages: 2, hasNextPage: true });
+    expect(first.checks).toHaveLength(1);
+    expect(first.checks[0]?.timestamp).toBe("2025-04-10T00:45:00.000Z");
+    const second = await queryChecks(
+      prior.id,
+      parseCheckQuery(new URLSearchParams("page=2&pageSize=1"), true),
+    );
+    expect(second.checks[0]?.timestamp).toBe("2025-04-10T00:00:00.000Z");
+
+    const failureQuery = parseCheckQuery(
+      new URLSearchParams("date=2025-04-10&serviceId=svc-a&status=failure"),
+      false,
+    );
+    const failure = await queryStats(prior.id, failureQuery);
+    expect(failure.overall).toEqual({
+      validChecks: 1,
+      successfulChecks: 0,
+      failedChecks: 1,
+      availabilityRatio: 0,
+      availabilityPercent: 0,
+      breached: true,
+      avgLatencyMs: 800,
+      p95LatencyMs: 800,
+      latencySamples: 1,
+    });
+    expect(failure.services).toHaveLength(1);
+
+    const noMatch = await queryStats(
+      prior.id,
+      parseCheckQuery(new URLSearchParams("serviceId=svc-none"), false),
+    );
+    expect(noMatch.overall.availabilityRatio).toBeNull();
+    expect(noMatch.overall.avgLatencyMs).toBeNull();
+    expect(noMatch.services).toEqual([]);
+
+    const injection = await queryChecks(
+      prior.id,
+      parseCheckQuery(new URLSearchParams("serviceId=svc-a%27%20OR%201%3D1--"), true),
+    );
+    expect(injection.pagination.totalRecords).toBe(0);
+  });
+
+  it("proves percentile, SLA, state, UTC, and stable tie/page boundaries", async () => {
+    const { db } = await import("../src/db/client");
+    const { parseCheckQuery } = await import("../src/api/query");
+    const {
+      queryChecks,
+      queryStats,
+      requireCompletedUpload,
+      UploadNotCompletedError,
+      UploadNotFoundError,
+    } = await import("../src/db/readChecks");
+    const metricHash = `${contentHash}-metric-boundaries`;
+    const metricRows = await db().query(
+      `INSERT INTO uploads
+         (content_hash, file_name, byte_size, status, date_range_start, date_range_end, completed_at)
+       VALUES ($1, $2, 1, 'completed', '2025-04-01T00:00:00Z', '2025-04-30T23:45:00Z', now())
+       RETURNING id`,
+      [metricHash, `metrics-${runTag}.csv`],
+    );
+    const metricId = String(metricRows[0]?.id);
+    createdIds.add(metricId);
+
+    await db().query(
+      `INSERT INTO reconciled_checks
+         (upload_id, service_id, service_name, check_timestamp, status_code, status,
+          latency_ms, agent, region, observation_count, source_row_number, observations)
+       SELECT $1, spec.service_id, spec.service_id,
+              '2025-04-10T12:00:00Z'::timestamptz + (spec.n || ' seconds')::interval,
+              CASE WHEN spec.success THEN 200 ELSE 503 END,
+              CASE WHEN spec.success THEN 'success' ELSE 'failure' END,
+              spec.n, 'agent', 'region', 1, spec.row_number, '[]'::jsonb
+       FROM (
+         SELECT 'p19'::text AS service_id, n, true AS success, n AS row_number
+           FROM generate_series(1, 19) n
+         UNION ALL
+         SELECT 'p20', n, true, 100 + n FROM generate_series(1, 20) n
+         UNION ALL
+         SELECT 'sla-exact', n, n <= 999, 1000 + n FROM generate_series(1, 1000) n
+         UNION ALL
+         SELECT 'sla-breach', n, n <= 998, 3000 + n FROM generate_series(1, 1000) n
+       ) spec`,
+      [metricId],
+    );
+    await db().query(
+      `INSERT INTO reconciled_checks
+         (upload_id, service_id, service_name, check_timestamp, status_code, status,
+          latency_ms, agent, region, observation_count, source_row_number, observations)
+       VALUES
+         ($1, 'tie-a', 'Tie A', '2025-04-10T23:45:00Z', 200, 'success', 1, 'a', 'r', 1, 5001, '[]'),
+         ($1, 'tie-a', 'Tie A', '2025-04-10T23:45:00Z', 200, 'success', 2, 'b', 'r', 1, 5002, '[]'),
+         ($1, 'tie-b', 'Tie B', '2025-04-10T23:45:00Z', 200, 'success', 3, 'a', 'r', 1, 5003, '[]'),
+         ($1, 'tie-c', 'Tie C', '2025-04-11T00:00:00Z', 200, 'success', 4, 'a', 'r', 1, 5004, '[]')`,
+      [metricId],
+    );
+
+    const statsFor = async (serviceId: string) =>
+      queryStats(metricId, parseCheckQuery(new URLSearchParams(`serviceId=${serviceId}`), false));
+    expect((await statsFor("p19")).overall.p95LatencyMs).toBe(19);
+    expect((await statsFor("p20")).overall.p95LatencyMs).toBe(19);
+    expect((await statsFor("sla-exact")).overall).toMatchObject({
+      availabilityPercent: 99.9,
+      breached: false,
+    });
+    expect((await statsFor("sla-breach")).overall).toMatchObject({
+      availabilityPercent: 99.8,
+      breached: true,
+    });
+
+    const dateQuery = (page: number) =>
+      parseCheckQuery(
+        new URLSearchParams(`date=2025-04-10&serviceId=tie-a&page=${page}&pageSize=1`),
+        true,
+      );
+    const tiePage1 = await queryChecks(metricId, dateQuery(1));
+    const tiePage2 = await queryChecks(metricId, dateQuery(2));
+    expect(tiePage1.pagination).toMatchObject({ totalRecords: 2, totalPages: 2, hasNextPage: true });
+    expect(Number(tiePage1.checks[0]?.id)).toBeLessThan(Number(tiePage2.checks[0]?.id));
+    const utcDay = await queryChecks(
+      metricId,
+      parseCheckQuery(new URLSearchParams("date=2025-04-10&pageSize=100"), true),
+    );
+    expect(utcDay.checks.slice(0, 3).map((check) => check.serviceId)).toEqual([
+      "tie-a",
+      "tie-a",
+      "tie-b",
+    ]);
+    expect(Number(utcDay.checks[0]?.id)).toBeLessThan(Number(utcDay.checks[1]?.id));
+    expect(utcDay.checks.some((check) => check.serviceId === "tie-c")).toBe(false);
+
+    await expect(requireCompletedUpload("00000000-0000-4000-8000-000000000000")).rejects.toBeInstanceOf(
+      UploadNotFoundError,
+    );
+    const processingRows = await db().query(
+      "INSERT INTO uploads (content_hash, file_name, byte_size, status) VALUES ($1, $2, 1, 'processing') RETURNING id",
+      [`${contentHash}-processing-state`, `processing-${runTag}.csv`],
+    );
+    const processingId = String(processingRows[0]?.id);
+    createdIds.add(processingId);
+    await expect(requireCompletedUpload(processingId)).rejects.toBeInstanceOf(UploadNotCompletedError);
+  });
+
+  it("excludes null latency from aggregates, maps it as null, and uses half-open range bounds", async () => {
+    const { db } = await import("../src/db/client");
+    const { parseCheckQuery } = await import("../src/api/query");
+    const { queryChecks, queryStats } = await import("../src/db/readChecks");
+    const nullHash = `${contentHash}-null-latency`;
+    const nullRows = await db().query(
+      `INSERT INTO uploads
+         (content_hash, file_name, byte_size, status, date_range_start, date_range_end, completed_at)
+       VALUES ($1, $2, 1, 'completed', '2025-04-01T00:00:00Z', '2025-04-30T23:45:00Z', now())
+       RETURNING id`,
+      [nullHash, `null-latency-${runTag}.csv`],
+    );
+    const nullId = String(nullRows[0]?.id);
+    createdIds.add(nullId);
+
+    // Six measured intervals (10..60 ms) plus two NULL-latency intervals — the
+    // state persisted when every observation in an interval has a blank latency.
+    await db().query(
+      `INSERT INTO reconciled_checks
+         (upload_id, service_id, service_name, check_timestamp, status_code, status,
+          latency_ms, agent, region, observation_count, source_row_number, observations)
+       SELECT $1, 'null-mix', 'Null Mix',
+              '2025-04-05T12:00:00Z'::timestamptz + (n || ' seconds')::interval,
+              200, 'success', n * 10, 'agent', 'region', 1, n, '[]'::jsonb
+       FROM generate_series(1, 6) n`,
+      [nullId],
+    );
+    await db().query(
+      `INSERT INTO reconciled_checks
+         (upload_id, service_id, service_name, check_timestamp, status_code, status,
+          latency_ms, agent, region, observation_count, source_row_number, observations)
+       VALUES
+         ($1, 'null-mix', 'Null Mix', '2025-04-05T12:30:00Z', 200, 'success', NULL, 'agent', 'region', 1, 10, '[]'),
+         ($1, 'null-mix', 'Null Mix', '2025-04-06T09:00:00Z', 503, 'failure', NULL, 'agent', 'region', 1, 11, '[]'),
+         ($1, 'edge', 'Edge', '2025-04-05T00:00:00Z', 200, 'success', 100, 'agent', 'region', 1, 12, '[]'),
+         ($1, 'edge', 'Edge', '2025-04-10T00:00:00Z', 200, 'success', 100, 'agent', 'region', 1, 13, '[]')`,
+      [nullId],
+    );
+
+    // COUNT(latency_ms) and the p95 FILTER exclude NULLs; AVG runs over the six
+    // measured samples only (multi-sample average); totals still count all rows.
+    const mixedStats = await queryStats(
+      nullId,
+      parseCheckQuery(new URLSearchParams("serviceId=null-mix"), false),
+    );
+    expect(mixedStats.overall).toMatchObject({
+      validChecks: 8,
+      successfulChecks: 7,
+      failedChecks: 1,
+      availabilityRatio: 0.875,
+      availabilityPercent: 87.5,
+      breached: true,
+      avgLatencyMs: 35,
+      p95LatencyMs: 60,
+      latencySamples: 6,
+    });
+
+    // The checks list maps NULL latency to latencyMs: null, not zero.
+    const mixed = await queryChecks(
+      nullId,
+      parseCheckQuery(new URLSearchParams("serviceId=null-mix&pageSize=100"), true),
+    );
+    expect(mixed.pagination.totalRecords).toBe(8);
+    expect(mixed.checks.find((c) => c.timestamp === "2025-04-05T12:30:00.000Z")?.latencyMs).toBeNull();
+    expect(mixed.checks.find((c) => c.timestamp === "2025-04-05T12:00:01.000Z")?.latencyMs).toBe(10);
+
+    // from=2025-04-05&to=2025-04-09 -> [04-05 00:00Z, 04-10 00:00Z): the row at
+    // the inclusive start is kept, the row exactly at toExclusive is dropped.
+    const ranged = await queryChecks(
+      nullId,
+      parseCheckQuery(
+        new URLSearchParams("from=2025-04-05&to=2025-04-09&serviceId=edge"),
+        true,
+      ),
+    );
+    expect(ranged.pagination.totalRecords).toBe(1);
+    expect(ranged.checks[0]?.timestamp).toBe("2025-04-05T00:00:00.000Z");
+    const unfilteredEdge = await queryChecks(
+      nullId,
+      parseCheckQuery(new URLSearchParams("serviceId=edge"), true),
+    );
+    expect(unfilteredEdge.pagination.totalRecords).toBe(2);
+
+    const edgeStats = await queryStats(
+      nullId,
+      parseCheckQuery(new URLSearchParams("serviceId=edge"), false),
+    );
+    expect(edgeStats.overall).toMatchObject({ latencySamples: 2, avgLatencyMs: 100, p95LatencyMs: 100 });
+  });
 });

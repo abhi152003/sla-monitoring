@@ -2,6 +2,8 @@ export type RouteMatch =
   | { handler: "health" }
   | { handler: "upload" }
   | { handler: "getUpload"; id: string }
+  | { handler: "getStats"; id: string }
+  | { handler: "getChecks"; id: string }
   | null;
 
 /** Pure route table, independently unit-testable. */
@@ -10,6 +12,10 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
   if (method === "POST" && pathname === "/uploads") return { handler: "upload" };
 
   if (method === "GET") {
+    const child = /^\/uploads\/([^/]+)\/(stats|checks)$/.exec(pathname);
+    if (child) {
+      return { handler: child[2] === "stats" ? "getStats" : "getChecks", id: child[1] };
+    }
     const m = /^\/uploads\/([^/]+)$/.exec(pathname);
     if (m) return { handler: "getUpload", id: m[1] };
   }
@@ -18,12 +24,18 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
 
 /** Whether the path exists independently of the request method. */
 export function isKnownPath(pathname: string): boolean {
-  return pathname === "/health" || pathname === "/uploads" || /^\/uploads\/[^/]+$/.test(pathname);
+  return (
+    pathname === "/health" ||
+    pathname === "/uploads" ||
+    /^\/uploads\/[^/]+(?:\/(?:stats|checks))?$/.test(pathname)
+  );
 }
 
 /** Methods accepted for a known path, including the shared CORS preflight. */
 export function allowedMethods(pathname: string): string | null {
-  if (pathname === "/health" || /^\/uploads\/[^/]+$/.test(pathname)) return "GET, OPTIONS";
+  if (pathname === "/health" || /^\/uploads\/[^/]+(?:\/(?:stats|checks))?$/.test(pathname)) {
+    return "GET, OPTIONS";
+  }
   if (pathname === "/uploads") return "POST, OPTIONS";
   return null;
 }

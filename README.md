@@ -114,9 +114,71 @@ curl -i -F "file=@docs/monitoring_checks_9d_seed101.csv" "$WORKER_URL/uploads"
 
 # The 201 response contains upload.id. Retrieve its persisted summary:
 curl -i "$WORKER_URL/uploads/<upload-id>"
+
+# Query persisted metrics and the first page of reconciled checks:
+curl -i "$WORKER_URL/uploads/<upload-id>/stats?from=2025-04-01&to=2025-04-30"
+curl -i "$WORKER_URL/uploads/<upload-id>/checks?page=1&pageSize=50&status=failure"
 ```
 
 `POST /uploads` returns HTTP 201 with `{ "created": true, "upload": ... }` for a new upload. Repeating the identical bytes returns HTTP 200 with `created: false` and the original summary. The endpoint returns 400 for malformed/non-CSV multipart input, 413 above 5 MiB, 409 while identical content is already processing, 422 for an ingestion-level CSV error, and 500 for an unexpected server error. Error bodies use `{ "error": "...", "message": "..." }` and never expose SQL, credentials, or stack traces.
+
+### Dashboard read APIs
+
+`GET /uploads/:id/stats` and `GET /uploads/:id/checks` read the persisted reconciled checks; they never parse the CSV again or use the stored upload-summary JSON for filtering. Both endpoints accept these optional filters:
+
+| Parameter | Meaning |
+| --- | --- |
+| `date=YYYY-MM-DD` | One complete UTC calendar day. Cannot be combined with `from` or `to`. |
+| `from=YYYY-MM-DD` | Inclusive UTC start date; may be supplied without `to`. |
+| `to=YYYY-MM-DD` | Inclusive UTC end date; may be supplied without `from`. |
+| `serviceId=<id>` | Exact, non-blank service identifier, maximum 128 characters. |
+| `status=success\|failure` | Exact reconciled status. |
+
+Date filters use half-open database bounds. A `date` becomes `[00:00:00Z, next-day 00:00:00Z)`; an inclusive `from`/`to` pair becomes `[from 00:00:00Z, day-after-to 00:00:00Z)`. Impossible dates, duplicate/unknown parameters, a reversed range, mixed date forms, blank or oversized service IDs, and unknown statuses return HTTP 400 with `invalid_query`. Unknown uploads return 404. Uploads that exist but are not completed return HTTP 409 with `upload_not_completed`. Query validation runs before the upload lookup, so an invalid query returns 400 even when the upload id is also unknown.
+
+The checks endpoint additionally accepts positive integer `page` and `pageSize`. Defaults are page 1 and page size 50; the maximum page size is 100. The stats endpoint rejects `page`/`pageSize` with 400 `invalid_query` because it returns aggregates, not pages. Results are stable across ties: timestamp descending, service ID ascending, then database check ID ascending. The response does not include observation evidence:
+
+```json
+{
+  "uploadId": "…",
+  "selectedRange": {
+    "date": null,
+    "from": "2025-04-01",
+    "to": "2025-04-30",
+    "fromInclusive": "2025-04-01T00:00:00.000Z",
+    "toExclusive": "2025-05-01T00:00:00.000Z",
+    "serviceId": null,
+    "status": "failure"
+  },
+  "checks": [
+    {
+      "id": "42",
+      "serviceId": "svc-a",
+      "serviceName": "A API",
+      "timestamp": "2025-04-30T23:45:00.000Z",
+      "statusCode": 503,
+      "status": "failure",
+      "latencyMs": 812.5,
+      "agent": "agent-1",
+      "region": "ap-south-1",
+      "observationCount": 2,
+      "sourceRowNumber": 14402
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "pageSize": 50,
+    "totalRecords": 3,
+    "totalPages": 1,
+    "hasPreviousPage": false,
+    "hasNextPage": false
+  }
+}
+```
+
+The stats response contains the same `uploadId` and `selectedRange`, an overall metric object, and service metric objects ordered by service ID. Each metric object includes `validChecks`, `successfulChecks`, `failedChecks`, `availabilityRatio`, availability percentage rounded to three decimals, strict breach (`ratio < 0.999`), average and nearest-rank p95 latency rounded to two decimals, and non-null latency sample count. Availability and breach are `null` when no checks match. Average and p95 are `null` when no matching check has latency. Per-service statistics include `serviceId` and `serviceName`.
+
+An explicit date/range result is always marked `partial`, because it is a selected subpopulation rather than a definitive monthly billing verdict. An unfiltered request is non-partial only when the persisted upload range covers complete UTC calendar months from the first `00:00` interval through the final `23:45` interval; otherwise it preserves R23's partial warning. `serviceId`/`status` filters alone do not set `partial`: R23's flag is a time-coverage verdict, so a service- or status-filtered view of a complete month reports `partial: false`.
 
 ### Deployed benchmark procedure and results (WO-4)
 
@@ -148,6 +210,12 @@ The deployment was verified on version `16dc69e1-3fe3-419e-a324-5a64154bc11d` wi
 | Persisted `GET /uploads/:id` | 200 | 0.484 s | — | — | Same upload id, content hash, and counts |
 
 Cloudflare reported `outcome: ok`; 331 ms is below the configured 1,000 ms ceiling. The fresh upload id was `3b83c504-fa54-4042-b3f4-d723fddadf2b`. The source fixture received trailing blank records solely to create a fresh SHA-256 identity; R1–R27 correctly ignores trailing blank records, so its semantic result matches the committed 30-day fixture.
+
+### Deployed dashboard API verification (WO-6)
+
+Worker version `3b28952f-aa75-4b1b-99d1-6158e5be9c43` was verified in production against persisted upload `c73fac04-1f4a-4c2f-81c8-19197e3d2fc9`. Health, upload replay, unfiltered statistics, two check pages, a UTC date selection, a service/failure selection, invalid input, an unknown upload, and method rejection all returned their expected HTTP statuses and contracts. The non-empty service/failure selection returned 9 failures and 9 latency samples; the selected UTC day returned 480 checks and `partial: true`.
+
+Representative Cloudflare traces reported `outcome: ok` and 5–11 ms CPU for database-backed statistics and checks requests. The UTC date request spent 12,757 ms waiting on external database/network work but consumed only 5 ms CPU, confirming that it remained below the configured 1,000 ms CPU ceiling. Client-observed warm read requests were otherwise approximately 0.39–0.74 seconds in this verification run.
 
 ### Workspace layout
 
