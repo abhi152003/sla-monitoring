@@ -45,3 +45,29 @@ None.
 ### Verdict
 
 **APPROVED** — no blocking findings. The independent cold review confirmed the dashboard is a contract-faithful, Worker-only client. All six advisory findings were fixed this round or accepted with recorded rationale; the owner verified the full flow locally and in production.
+
+---
+
+## Round 2
+
+### Requirements Alignment
+
+**Blocking (owner review of commit `c77eda6`):**
+
+1. Statistics retained a collapsed local state across uploads — a newly uploaded dataset did not re-expand the section. **Fixed:** `StatisticsSection` is keyed by upload id in `apps/web/src/app/page.tsx`, so a new dataset remounts the section expanded (the same keyed-remount pattern `LogsFilters` already uses).
+2. The statistics and logs error panels had no live region, so screen readers were not notified when those asynchronous requests failed. **Fixed:** both panels carry `role="alert"` (`StatisticsSection.tsx`, `LogsTable.tsx`).
+
+**Advisory:** None.
+
+### Blueprint Alignment
+
+**Blocking:** None. WO-7 has no connected blueprints.
+
+### Verification Evidence
+
+- Static analysis after the fixes: `npm run lint` clean, `npm run type-check` clean, `npm run build` clean.
+- The logs error-label fix from Round 1 was confirmed working by the owner's review of `c77eda6`.
+
+### Verdict
+
+**APPROVED** — both owner-review findings are fixed; no open items from either round.

@@ -78,7 +78,7 @@ export function LogsTable({
 
       <div className="px-5 py-4">
         {error && !data ? (
-          <div className="rounded-md border border-danger/30 bg-danger-soft px-3 py-2.5 text-sm text-danger">
+          <div role="alert" className="rounded-md border border-danger/30 bg-danger-soft px-3 py-2.5 text-sm text-danger">
             <p>{describeError(error)}</p>
             <button
               type="button"

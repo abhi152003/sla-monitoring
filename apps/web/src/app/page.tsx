@@ -106,7 +106,9 @@ export default function DashboardPage() {
     bodyContent = (
       <>
         <ProcessingSummary summary={summary} />
+        {/* Keyed by upload id so a fresh dataset starts with statistics expanded. */}
         <StatisticsSection
+          key={summary.id}
           stats={statsQuery.data}
           isPending={statsQuery.isPending}
           isRefreshing={statsQuery.isFetching && !statsQuery.isPending}
