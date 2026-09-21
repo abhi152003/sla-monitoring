@@ -391,6 +391,25 @@ Two agents (agent-1, agent-2) sometimes report the **same service + interval** (
 | 10 | Incident-log windows match 5xx clusters + latency spikes | all logged incidents | R27 |
 | 11 | Datasets span 9–30 days, never full calendar months | all files | R23, R26 |
 
+### Supplied dataset coverage map (UTC)
+
+Exact per-file check ranges (parsed across all timestamp forms, R5–R7; every file runs on the 15-minute grid from a day's first `00:00` slot to its last `23:45` slot), in chronological order:
+
+| Dataset | Rows | First → last check (UTC) |
+| --- | ---: | --- |
+| `monitoring_checks_21d_seed303.csv` | 10,904 | 2025-04-03 00:00 → 2025-04-23 23:45 |
+| `monitoring_checks_30d_seed404.csv` | 15,577 | 2025-04-06 00:00 → 2025-05-05 23:45 |
+| `monitoring_checks_12d_seed505.csv` | 6,230 | 2025-04-10 00:00 → 2025-04-21 23:45 |
+| `monitoring_checks_9d_seed101.csv` | 4,672 | 2025-05-08 00:00 → 2025-05-16 23:45 |
+| `monitoring_checks_14d_seed202.csv` | 7,269 | 2025-05-19 00:00 → 2025-06-01 23:45 |
+| **Union** | **44,652** | **2025-04-03 00:00 → 2025-06-01 23:45** (60-day envelope) |
+
+Observations on the union:
+
+- **The envelope is not continuous.** The April files overlap (21d ∩ 30d on Apr 6–23; 12d sits entirely inside both), but May has two holes with no checks from any file: **May 6–7** (last check May 5 23:45Z, next May 8 00:00Z) and **May 17–18** (last check May 16 23:45Z, next May 19 00:00Z). May coverage is 27 of 31 days.
+- **No complete calendar month exists in any combination of the files.** April is missing Apr 1–2 (union starts Apr 3), June has only Jun 1, and May is missing four days (6, 7, 17, 18). Consequently every upload of these datasets reports `partial: true` under R23 — the flag is expected behavior, not a data or pipeline error.
+- **Endpoint semantics.** `isCompleteUploadRange` decides non-partial from the persisted range *endpoints* only (first check at a month's 1st `00:00Z`, last check at that month's final `23:45Z` slot); interior grid holes do not set `partial` — they surface as per-service coverage metrics under R24. Even so, no merge of these files satisfies the endpoints (the natural May-bounded merge of 30d + 9d + 14d trimmed to May 1 → May 31 would pass the endpoint check with its four interior days missing, illustrating the difference between the two signals).
+
 ## 10. Assumptions
 
 - **A1:** One check per service per 15-minute interval is the intended cadence (stated in the brief; confirmed — all timestamps land on the grid after normalization).
